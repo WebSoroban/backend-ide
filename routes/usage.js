@@ -73,4 +73,78 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/usage/summary
+ * Get aggregate usage statistics for the whole project (all users)
+ */
+router.get('/summary', async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    // Fetch recent logs for all users
+    const logs = await UsageLog.find({
+      createdAt: { $gte: thirtyDaysAgo }
+    }).sort({ createdAt: -1 }).limit(2000);
+
+    const totals = {
+      compile: 0,
+      deploy: 0,
+      function_test: 0
+    };
+
+    const dailyMap = new Map();
+    const uniqueUsers = new Set();
+
+    for (const log of logs) {
+      if (!log || !log.action || !log.createdAt) continue;
+
+      const action = log.action;
+      if (totals[action] !== undefined) {
+        totals[action] += 1;
+      }
+
+      if (log.userId) {
+        uniqueUsers.add(String(log.userId));
+      }
+
+      const dateKey = log.createdAt.toISOString().slice(0, 10);
+      if (!dailyMap.has(dateKey)) {
+        dailyMap.set(dateKey, {
+          date: dateKey,
+          compile: 0,
+          deploy: 0,
+          function_test: 0
+        });
+      }
+
+      const day = dailyMap.get(dateKey);
+      if (day[action] !== undefined) {
+        day[action] += 1;
+      }
+    }
+
+    const daily = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    res.json({
+      success: true,
+      summary: {
+        totalEvents: logs.length,
+        uniqueUsers: uniqueUsers.size,
+        totals,
+        periodStart: thirtyDaysAgo.toISOString(),
+        periodEnd: new Date().toISOString()
+      },
+      daily
+    });
+  } catch (error) {
+    console.error('Get usage summary error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get usage summary',
+      message: error.message
+    });
+  }
+});
+
 module.exports = router;
