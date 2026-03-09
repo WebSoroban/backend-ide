@@ -1,148 +1,152 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User');
-const UsageLog = require('../models/UsageLog');
+const ContractEvent = require('../models/ContractEvent');
 const deploymentService = require('../services/deploymentService');
+const { authApiKey } = require('../middleware/authApiKey');
 const { authenticate } = require('../middleware/auth');
 
 /**
  * POST /api/contracts/:contractAddress/invoke
- * Invoke a contract function (with usage limit check)
+ * Invoke a contract function (IDE). Requires JWT.
  */
 router.post('/:contractAddress/invoke', authenticate, async (req, res) => {
   try {
-    const { contractAddress } = req.params;
+    const contractAddress = req.params.contractAddress;
     const { functionName, args = [], network = 'testnet' } = req.body;
-    const user = req.user;
-    
     if (!functionName) {
       return res.status(400).json({
         success: false,
-        error: 'Function name is required'
+        error: 'Missing required parameter: functionName'
       });
     }
-    
-    // Check function test limit
-    const canTest = user.canTestFunction();
-    if (!canTest.allowed) {
-      return res.status(403).json({
-        success: false,
-        error: canTest.reason,
-        current: canTest.current,
-        limit: canTest.limit,
-        upgradeRequired: true
-      });
-    }
-    
-    // Log usage attempt
-    const usageLog = new UsageLog({
-      userId: user._id,
-      action: 'function_test',
+    const invokeResult = await deploymentService.invokeContract(
       contractAddress,
       functionName,
-      success: false,
-      metadata: {
-        args,
-        network
-      }
+      args,
+      null,
+      network
+    );
+    res.json({
+      success: invokeResult.success,
+      output: invokeResult.output,
+      contractId: invokeResult.contractId,
+      functionName: invokeResult.functionName,
+      args: invokeResult.args,
+      logs: invokeResult.logs
     });
-    
-    try {
-      // Invoke contract function
-      const result = await deploymentService.invokeContract(
-        contractAddress,
-        functionName,
-        args,
-        null, // sourceAccount - will use default
-        network
-      );
-      
-      // Increment usage count
-      await user.incrementFunctionTest();
-      
-      // Update usage log
-      usageLog.success = result.success;
-      usageLog.metadata.output = result.output;
-      if (!result.success) {
-        usageLog.error = result.error;
-      }
-      await usageLog.save();
-      
-      if (result.success) {
-        res.json({
-          success: true,
-          output: result.output,
-          contractAddress,
-          functionName,
-          args,
-          usage: {
-            count: user.usage.functionTests.count,
-            limit: user.usage.functionTests.limit,
-            remaining: user.usage.functionTests.limit === -1 
-              ? 'unlimited' 
-              : Math.max(0, user.usage.functionTests.limit - user.usage.functionTests.count)
-          }
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          error: result.error,
-          logs: result.logs
-        });
-      }
-    } catch (error) {
-      // Update usage log with error
-      usageLog.success = false;
-      usageLog.error = error.message;
-      await usageLog.save();
-      
-      console.error('Contract invocation error:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Failed to invoke contract function',
-        message: error.message
-      });
-    }
   } catch (error) {
-    console.error('Invoke contract error:', error);
+    console.error('[Contracts] Invoke error:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to invoke contract',
+      error: 'Contract invocation failed',
       message: error.message
     });
   }
 });
 
-/**
- * GET /api/contracts/:contractAddress
- * Get contract information
- */
-router.get('/:contractAddress', authenticate, async (req, res) => {
+const SOROBAN_RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
+
+function normalizeContractId(addr) {
+  if (!addr || typeof addr !== 'string') return addr;
+  const s = addr.trim();
+  return s.startsWith('C') ? s : `C${s}`;
+}
+
+async function fetchEventsFromRpc(contractAddress, limit = 20) {
   try {
-    const { contractAddress } = req.params;
-    
-    // Get usage logs for this contract
-    const logs = await UsageLog.find({
-      contractAddress,
-      userId: req.user._id,
-      action: 'function_test'
-    }).sort({ createdAt: -1 }).limit(10);
-    
+    const contractId = normalizeContractId(contractAddress);
+    const resLedger = await fetch(SOROBAN_RPC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getLatestLedger',
+        params: {}
+      })
+    });
+    const dataLedger = await resLedger.json();
+    const latest = dataLedger.result?.sequence ?? dataLedger.result ?? 0;
+    const startLedger = Math.max(0, Number(latest) - 10000);
+
+    const res = await fetch(SOROBAN_RPC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'getEvents',
+        params: {
+          startLedger: String(startLedger),
+          filters: [{ contractIds: [contractId], type: 'contract' }],
+          pagination: { limit: Math.min(limit, 100) }
+        }
+      })
+    });
+    const data = await res.json();
+    if (data.error || !data.result) return [];
+    const raw = data.result.events ?? data.result ?? [];
+    const list = Array.isArray(raw) ? raw : [];
+    return list.map((ev) => ({
+      contract: ev.contractId ?? contractId,
+      eventType: ev.type ?? ev.name ?? 'contract_event',
+      data: ev.value ?? ev.data ?? {},
+      txHash: ev.txHash ?? ev.transactionHash ?? ev.tx ?? ev.id ?? '',
+      ledger: typeof ev.ledger === 'string' ? parseInt(ev.ledger, 10) : (ev.ledger ?? 0),
+      timestamp: ev.ledgerClosedAt ? new Date(ev.ledgerClosedAt) : null,
+      fromRpc: true
+    }));
+  } catch (err) {
+    console.error('[Contracts] fetchEventsFromRpc error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * GET /api/contracts/:address/events
+ * List events for a contract. Uses index first, then falls back to RPC getEvents. Requires API key.
+ */
+router.get('/:address/events', authApiKey, async (req, res) => {
+  try {
+    const { address } = req.params;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const cursor = req.query.cursor;
+    const eventType = req.query.eventType;
+
+    const contractNorm = normalizeContractId(address);
+    const filter = { $or: [{ contract: address }, { contract: contractNorm }, { contract: address.startsWith('C') ? address.slice(1) : `C${address}` }] };
+    if (eventType) filter.eventType = eventType;
+    if (cursor) {
+      const doc = await ContractEvent.findOne({ _id: cursor }).select('timestamp').lean();
+      if (doc && doc.timestamp) {
+        filter.timestamp = { $lt: doc.timestamp };
+      }
+    }
+
+    let events = await ContractEvent.find(filter)
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .select('contract eventType data txHash ledger timestamp')
+      .lean();
+
+    if (events.length === 0) {
+      const rpcEvents = await fetchEventsFromRpc(address, limit);
+      events = rpcEvents.map((e) => {
+        const { fromRpc, ...rest } = e;
+        return rest;
+      });
+    }
+
     res.json({
       success: true,
-      contractAddress,
-      functionTests: logs.length,
-      recentTests: logs.map(log => ({
-        functionName: log.functionName,
-        success: log.success,
-        createdAt: log.createdAt
-      }))
+      events,
+      nextCursor: events.length === limit ? events[events.length - 1]?._id?.toString() : null
     });
   } catch (error) {
-    console.error('Get contract error:', error);
+    console.error('[Contracts] Error:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to get contract information',
+      error: 'Failed to fetch contract events',
       message: error.message
     });
   }

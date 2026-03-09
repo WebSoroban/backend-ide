@@ -147,4 +147,42 @@ router.get('/summary', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/usage/activity
+ * Get recent activity logs for all users (platform-wide for analytics)
+ */
+router.get('/activity', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const logs = await UsageLog.find({})
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate('userId', 'email name')
+      .lean();
+
+    const activity = logs.map((log) => ({
+      _id: log._id,
+      action: log.action,
+      projectId: log.projectId,
+      contractAddress: log.contractAddress,
+      functionName: log.functionName,
+      success: log.success,
+      error: log.error,
+      createdAt: log.createdAt,
+      user: log.userId
+            ? { email: log.userId.email, name: log.userId.name || null }
+            : null
+    }));
+
+    res.json({ success: true, logs: activity });
+  } catch (error) {
+    console.error('Get usage activity error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get activity logs',
+      message: error.message
+    });
+  }
+});
+
 module.exports = router;

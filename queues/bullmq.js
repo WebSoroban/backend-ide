@@ -50,6 +50,7 @@ connection.on('reconnecting', () => {
 // Queue names
 const COMPILE_QUEUE_NAME = 'compile';
 const DEPLOY_QUEUE_NAME = 'deploy';
+const WEBHOOK_QUEUE_NAME = 'webhook';
 
 /**
  * Create a queue instance
@@ -109,6 +110,7 @@ module.exports = {
   createWorker,
   createQueueEvents,
   COMPILE_QUEUE_NAME,
-  DEPLOY_QUEUE_NAME
+  DEPLOY_QUEUE_NAME,
+  WEBHOOK_QUEUE_NAME
 };
 

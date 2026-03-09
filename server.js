@@ -15,7 +15,8 @@ const allowedOrigins = [
   "https://web-soroban.vercel.app",
   "https://websoroban.in",
   "https://www.websoroban.in",
-  "http://localhost:3000" // Keep localhost for local development
+  "http://localhost:3000",
+  "http://127.0.0.1:3000"
 ];
 
 // CORS validation function
@@ -35,16 +36,25 @@ const corsOptions = {
     // Check if origin is in allowed list (exact match or normalized)
     if (allowedOrigins.includes(origin) || allowedOrigins.includes(normalizedOrigin)) {
       console.log(`[CORS] Origin allowed: ${origin}`);
-      callback(null, true);
-    } else {
-      console.log(`[CORS] Origin NOT allowed: ${origin}`);
-      console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
-      callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
+      return callback(null, true);
     }
+    // In development, allow any localhost / 127.0.0.1 origin (different ports)
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        const u = new URL(origin);
+        if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+          console.log(`[CORS] Origin allowed (dev): ${origin}`);
+          return callback(null, true);
+        }
+      } catch (_) {}
+    }
+    console.log(`[CORS] Origin NOT allowed: ${origin}`);
+    console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
+    callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"],
   exposedHeaders: ["Content-Type"]
 };
 
@@ -103,6 +113,13 @@ app.use('/api/premium-gifts', require('./routes/premium-gifts'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/usage', require('./routes/usage'));
 app.use('/api/contracts', require('./routes/contracts'));
+
+// Phase 1: Developer infrastructure
+app.use('/api/apikeys', require('./routes/apikeys'));
+app.use('/api/rpc', require('./routes/rpc'));
+app.use('/api/accounts', require('./routes/accounts'));
+app.use('/api/transactions', require('./routes/transactions'));
+app.use('/api/webhooks', require('./routes/webhooks'));
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {

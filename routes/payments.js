@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const Payment = require('../models/Payment');
 const paymentService = require('../services/paymentService');
 const { authenticate } = require('../middleware/auth');
 
@@ -91,6 +92,45 @@ router.get('/history', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to get payment history',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/payments/all
+ * Get recent payment transactions for all users (platform-wide for analytics)
+ */
+router.get('/all', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const payments = await Payment.find({})
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate('userId', 'email name')
+      .lean();
+
+    const list = payments.map((p) => ({
+      _id: p._id,
+      plan: p.plan,
+      amount: p.amount,
+      currency: p.currency,
+      txHash: p.txHash,
+      network: p.network,
+      status: p.status,
+      fromAddress: p.fromAddress,
+      toAddress: p.toAddress,
+      confirmedAt: p.confirmedAt,
+      createdAt: p.createdAt,
+      user: p.userId ? { email: p.userId.email, name: p.userId.name || null } : null
+    }));
+
+    res.json({ success: true, payments: list });
+  } catch (error) {
+    console.error('Get all payments error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get transaction history',
       message: error.message
     });
   }
