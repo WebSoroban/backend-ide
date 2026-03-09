@@ -1,7 +1,6 @@
 services:
   redis:
     image: redis:7-alpine
-    platform: linux/arm64
     ports:
       - "6379:6379"
     volumes:
@@ -10,9 +9,10 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 5
+      start_period: 10s
 
   mongodb:
     image: mongo:7
