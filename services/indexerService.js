@@ -1,9 +1,10 @@
 /**
  * Soroban blockchain indexer service.
  * Fetches ledger/transaction data from Soroban RPC and stores in MongoDB.
+ * Block storage is disabled (temporarily); only IndexerState, Transaction, and ContractEvent are used.
  */
 
-const Block = require('../models/Block');
+const IndexerState = require('../models/IndexerState');
 const Transaction = require('../models/Transaction');
 const ContractEvent = require('../models/ContractEvent');
 const { addWebhookDeliveryJobs } = require('../queues/webhookQueue');
@@ -40,11 +41,11 @@ async function getLatestLedger() {
 
 /**
  * Fetch and index a single ledger by sequence.
- * Stores Block, Transactions, and ContractEvents; enqueues webhook deliveries for matching events.
+ * Stores Transactions and ContractEvents only (Block storage disabled). Enqueues webhook deliveries for matching events.
  */
 async function indexLedger(sequence) {
-  const existing = await Block.findOne({ sequence });
-  if (existing) {
+  const last = await getLastIndexedSequence();
+  if (last >= sequence) {
     return { indexed: false, sequence, reason: 'already_indexed' };
   }
 
@@ -64,13 +65,7 @@ async function indexLedger(sequence) {
   const ledgerSeq = ledger.sequence ?? ledger.id ?? sequence;
   const closedAt = ledger.closedAt ? new Date(ledger.closedAt) : new Date();
 
-  await Block.create({
-    ledger: ledgerSeq,
-    sequence: ledgerSeq,
-    closedAt,
-    txCount: 0,
-    raw: ledger
-  });
+  // Block storage disabled - do not save Block documents
 
   let txHashes = [];
   try {
@@ -134,17 +129,22 @@ async function indexLedger(sequence) {
     }
   }
 
-  await Block.updateOne({ sequence: ledgerSeq }, { $set: { txCount: txIds.length } });
+  // Update indexer progress (Block storage disabled)
+  await IndexerState.findOneAndUpdate(
+    {},
+    { $set: { lastSequence: ledgerSeq } },
+    { upsert: true }
+  );
   console.log(`[IndexerService] Indexed ledger ${ledgerSeq}, ${txIds.length} transactions`);
   return { indexed: true, sequence: ledgerSeq, txCount: txIds.length };
 }
 
 /**
- * Get the last indexed ledger sequence from DB
+ * Get the last indexed ledger sequence from DB (from IndexerState; Block collection not used).
  */
 async function getLastIndexedSequence() {
-  const last = await Block.findOne().sort({ sequence: -1 }).select('sequence').lean();
-  return last?.sequence ?? 0;
+  const doc = await IndexerState.findOne().select('lastSequence').lean();
+  return doc?.lastSequence ?? 0;
 }
 
 /**

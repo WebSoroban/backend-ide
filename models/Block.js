@@ -1,3 +1,8 @@
+/**
+ * Block model - TEMPORARILY UNUSED.
+ * Indexer no longer writes to this collection (saves space). Progress is tracked via IndexerState.
+ * Do not add routes or logic that read/write Block until re-enabled.
+ */
 const mongoose = require('mongoose');
 
 const blockSchema = new mongoose.Schema({
