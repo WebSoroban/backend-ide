@@ -2,6 +2,9 @@ const StellarSdk = require('@stellar/stellar-sdk');
 const Payment = require('../models/Payment');
 const Subscription = require('../models/Subscription');
 const User = require('../models/User');
+const TemplatePurchase = require('../models/TemplatePurchase');
+const { getTemplateById, PRICE_BY_ID } = require('../data/templateCatalog');
+const emailService = require('./emailService');
 
 
 
@@ -350,6 +353,77 @@ class PaymentService {
       return {
         success: false,
         error: error.message || 'Failed to process payment'
+      };
+    }
+  }
+
+  /**
+   * Process template purchase payment (same gateway as plans: XLM to PAYMENT_ADDRESS, memo = purchaseId)
+   */
+  async processTemplatePayment(txHash, purchaseId) {
+    try {
+      const purchase = await TemplatePurchase.findById(purchaseId);
+      if (!purchase) {
+        return { success: false, error: 'Purchase not found' };
+      }
+      if (purchase.status === 'confirmed') {
+        return { success: false, error: 'Template already unlocked for this purchase' };
+      }
+      if (purchase.status !== 'pending') {
+        return { success: false, error: 'Purchase is no longer pending' };
+      }
+
+      const expectedAmount = purchase.amount;
+      const memo = purchase.memo;
+
+      const verification = await this.verifyPayment(txHash, expectedAmount, memo);
+      if (!verification.success) {
+        await TemplatePurchase.findByIdAndUpdate(purchaseId, { status: 'failed' });
+        return verification;
+      }
+
+      await TemplatePurchase.findByIdAndUpdate(purchaseId, {
+        status: 'confirmed',
+        txHash,
+        confirmedAt: new Date(),
+        network: process.env.PAYMENT_NETWORK || 'testnet'
+      });
+
+      const user = await User.findById(purchase.userId);
+      if (user && !user.purchasedTemplates.includes(purchase.templateId)) {
+        user.purchasedTemplates.push(purchase.templateId);
+        await user.save();
+      }
+
+      // Send purchase confirmation email (non-blocking)
+      try {
+        const template = getTemplateById(purchase.templateId);
+        const templateName = template ? template.name : purchase.templateId;
+        const userEmail = user?.email;
+        if (userEmail && userEmail !== `${user?.walletAddress?.substring(0, 8)}@wallet.local`) {
+          await emailService.sendTemplatePurchaseNotification(
+            userEmail,
+            templateName,
+            purchase.amount,
+            purchase.currency || 'XLM',
+            txHash,
+            { userName: user?.name || user?.email?.split('@')[0] }
+          );
+        }
+      } catch (emailErr) {
+        console.error('[PaymentService] Template purchase email failed:', emailErr);
+      }
+
+      return {
+        success: true,
+        message: 'Template purchase confirmed',
+        templateId: purchase.templateId
+      };
+    } catch (error) {
+      console.error('Process template payment error:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to process template payment'
       };
     }
   }

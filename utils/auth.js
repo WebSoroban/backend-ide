@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 const { Keypair } = require('@stellar/stellar-sdk');
 
 const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d';
 
 /**
  * Generate JWT token for user

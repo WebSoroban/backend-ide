@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Project = require('../models/Project');
 const { authenticate } = require('../middleware/auth');
+const { FREE_TEMPLATE_IDS } = require('../data/templateCatalog');
 
 // GET /api/projects - List all projects for current user
 router.get('/', authenticate, async (req, res) => {
@@ -29,6 +30,18 @@ router.post('/', authenticate, async (req, res) => {
     // Convert project name to a valid crate name (lowercase, replace spaces with hyphens, remove special chars)
     const crateName = projectName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'contract';
     
+    // Premium template access: user must have purchased the template
+    if (template && template !== 'blank' && template !== 'empty' && !FREE_TEMPLATE_IDS.includes(template)) {
+      const purchased = user.purchasedTemplates || [];
+      if (!purchased.includes(template)) {
+        return res.status(403).json({
+          error: 'Template not purchased',
+          code: 'TEMPLATE_PURCHASE_REQUIRED',
+          message: 'Purchase this template from the marketplace to use it.'
+        });
+      }
+    }
+
     if (template === 'blank' || template === 'empty') {
       // Create blank project with empty lib.rs, Cargo.toml with project name, and .cargo/config.toml
       defaultFiles = [

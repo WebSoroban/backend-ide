@@ -269,7 +269,8 @@ router.post('/wallet/verify', async (req, res) => {
         name: user.name,
         picture: user.picture,
         subscription: user.subscription,
-        usage: user.usage
+        usage: user.usage,
+        purchasedTemplates: user.purchasedTemplates || []
       }
     });
   } catch (error) {
@@ -301,6 +302,7 @@ router.get('/me', authenticate, async (req, res) => {
         authMethod: user.authMethod,
         subscription: user.subscription,
         usage: user.usage,
+        purchasedTemplates: user.purchasedTemplates || [],
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
       }

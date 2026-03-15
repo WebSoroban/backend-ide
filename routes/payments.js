@@ -68,6 +68,49 @@ router.post('/verify', authenticate, async (req, res) => {
 });
 
 /**
+ * POST /api/payments/verify-template
+ * Verify template purchase payment (same XLM gateway as plans)
+ */
+router.post('/verify-template', authenticate, async (req, res) => {
+  try {
+    const { txHash, purchaseId } = req.body;
+    const user = req.user;
+
+    if (!txHash || !purchaseId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Transaction hash and purchaseId are required'
+      });
+    }
+
+    const result = await paymentService.processTemplatePayment(txHash, purchaseId);
+
+    if (result.success) {
+      // Refresh user to get updated purchasedTemplates
+      const updatedUser = await require('../models/User').findById(user._id);
+      return res.json({
+        success: true,
+        message: result.message,
+        templateId: result.templateId,
+        purchasedTemplates: updatedUser?.purchasedTemplates || []
+      });
+    }
+
+    res.status(400).json({
+      success: false,
+      error: result.error
+    });
+  } catch (error) {
+    console.error('Verify template payment error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to verify template payment',
+      message: error.message
+    });
+  }
+});
+
+/**
  * GET /api/payments/history
  * Get payment history for current user
  */

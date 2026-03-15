@@ -364,6 +364,128 @@ If you have any questions or need assistance, please don't hesitate to contact o
   }
 
   /**
+   * Generate HTML email template for template purchase confirmation
+   */
+  generateTemplatePurchaseEmailTemplate(userName, templateName, amount, currency, txHash, appName = 'WebSoroban IDE') {
+    const frontendUrl = process.env.FRONTEND_URL || 'https://websoroban.in';
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Template Purchased - ${appName}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <div style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+    <h1 style="color: white; margin: 0; font-size: 28px;">✓ Template Purchased</h1>
+  </div>
+  
+  <div style="background: #ffffff; padding: 40px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+    <p style="font-size: 16px; margin-bottom: 20px;">Hello${userName ? ` ${userName}` : ''},</p>
+    
+    <p style="font-size: 16px; margin-bottom: 20px;">
+      Your purchase of the <strong>${templateName}</strong> template was successful. You can now use it in the IDE.
+    </p>
+    
+    <div style="background: #f0f9ff; border: 2px solid #3b82f6; border-radius: 8px; padding: 24px; margin: 30px 0;">
+      <p style="margin: 0 0 8px 0; font-size: 14px; color: #1e40af; text-transform: uppercase; letter-spacing: 1px;">Purchase details</p>
+      <p style="margin: 0 0 4px 0; font-size: 18px; font-weight: bold; color: #1e3a8a;">${templateName}</p>
+      <p style="margin: 0 0 4px 0; font-size: 16px; color: #334155;">Amount: ${amount} ${currency}</p>
+      <p style="margin: 0; font-size: 12px; color: #64748b; font-family: monospace; word-break: break-all;">Tx: ${txHash || 'N/A'}</p>
+    </div>
+    
+    <div style="text-align: center; margin-top: 30px;">
+      <a href="${frontendUrl}/ide" 
+         style="display: inline-block; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+        Open IDE & use template
+      </a>
+    </div>
+    
+    <p style="font-size: 14px; color: #666; margin-top: 40px; padding-top: 20px; border-top: 1px solid #eee;">
+      Create a new project and choose "${templateName}" from the template list to get started.
+    </p>
+  </div>
+  
+  <div style="text-align: center; margin-top: 20px; padding: 20px; color: #999; font-size: 12px;">
+    <p style="margin: 0;">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>
+  </div>
+</body>
+</html>
+    `.trim();
+  }
+
+  /**
+   * Generate plain text email for template purchase confirmation
+   */
+  generateTemplatePurchaseEmailText(userName, templateName, amount, currency, txHash, appName = 'WebSoroban IDE') {
+    const frontendUrl = process.env.FRONTEND_URL || 'https://websoroban.in';
+    return `
+Template Purchased - ${appName}
+
+Hello${userName ? ` ${userName}` : ''},
+
+Your purchase of the ${templateName} template was successful. You can now use it in the IDE.
+
+Purchase details:
+- Template: ${templateName}
+- Amount: ${amount} ${currency}
+- Transaction: ${txHash || 'N/A'}
+
+Open the IDE: ${frontendUrl}/ide
+
+Create a new project and choose "${templateName}" from the template list to get started.
+
+© ${new Date().getFullYear()} ${appName}. All rights reserved.
+    `.trim();
+  }
+
+  /**
+   * Send template purchase confirmation email
+   * @param {string} to - Recipient email
+   * @param {string} templateName - Name of the template purchased
+   * @param {number} amount - Amount paid
+   * @param {string} currency - Currency (e.g. XLM)
+   * @param {string} txHash - Transaction hash
+   * @param {Object} options - { userName, appName, subject }
+   */
+  async sendTemplatePurchaseNotification(to, templateName, amount, currency, txHash, options = {}) {
+    if (!this.transporter) {
+      this.initialize();
+      if (!this.transporter) {
+        console.warn('[EmailService] SMTP not configured, skipping template purchase email');
+        return { success: false, error: 'Email not configured' };
+      }
+    }
+
+    const appName = options.appName || 'WebSoroban IDE';
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
+    const fromName = process.env.SMTP_FROM_NAME || appName;
+    if (!fromEmail) {
+      console.warn('[EmailService] SMTP_FROM/SMTP_USER not set, skipping template purchase email');
+      return { success: false, error: 'From email not set' };
+    }
+
+    const userName = options.userName || null;
+    const mailOptions = {
+      from: `"${fromName}" <${fromEmail}>`,
+      to: to,
+      subject: options.subject || `✓ Template purchased: ${templateName} - ${appName}`,
+      text: this.generateTemplatePurchaseEmailText(userName, templateName, amount, currency, txHash, appName),
+      html: this.generateTemplatePurchaseEmailTemplate(userName, templateName, amount, currency, txHash, appName)
+    };
+
+    try {
+      const info = await this.transporter.sendMail(mailOptions);
+      console.log(`[EmailService] Template purchase confirmation sent to ${to}:`, info.messageId);
+      return { success: true, messageId: info.messageId };
+    } catch (error) {
+      console.error('[EmailService] Failed to send template purchase email:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Send premium gift notification email
    * @param {string} to - Recipient email address
    * @param {number} durationDays - Duration of the premium subscription in days
