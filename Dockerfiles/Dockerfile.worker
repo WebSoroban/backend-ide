@@ -44,8 +44,9 @@ COPY . .
 COPY scripts/compile.sh /usr/local/bin/compile.sh
 RUN chmod +x /usr/local/bin/compile.sh
 
-# Create necessary directories
-RUN mkdir -p /app/temp /app/logs
+# Create necessary directories (stellar-cli stores keys under HOME/.config/stellar)
+ENV HOME=/app
+RUN mkdir -p /app/temp /app/logs /app/.config/stellar
 
 # Default worker type (can be overridden)
 ENV WORKER_TYPE=compile

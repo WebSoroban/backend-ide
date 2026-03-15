@@ -7,6 +7,23 @@ const execAsync = util.promisify(exec);
 const socketService = require('./socketService');
 const StellarSdk = require('@stellar/stellar-sdk');
 
+const DEFAULT_TESTNET_RPC = 'https://soroban-testnet.stellar.org';
+const DEFAULT_PUBLIC_RPC = 'https://soroban-mainnet.stellar.org';
+
+/** Get env for Stellar CLI so RPC + network work (required by newer stellar-cli). */
+function getStellarEnv(network = 'testnet') {
+  const passphrase = network === 'testnet' || network === 'test'
+    ? StellarSdk.Networks.TESTNET
+    : StellarSdk.Networks.PUBLIC;
+  const rpcUrl = process.env.SOROBAN_RPC_URL || process.env.STELLAR_RPC_URL ||
+    (network === 'testnet' || network === 'test' ? DEFAULT_TESTNET_RPC : DEFAULT_PUBLIC_RPC);
+  return {
+    ...process.env,
+    STELLAR_NETWORK_PASSPHRASE: passphrase,
+    STELLAR_RPC_URL: rpcUrl
+  };
+}
+
 // Check if Stellar CLI is available
 let stellarAvailable = false;
 try {
@@ -32,20 +49,31 @@ class DeploymentService {
       return true;
     } catch (error) {
       // Keypair doesn't exist, create it
+      const env = getStellarEnv(network);
+      const passphrase = network === 'testnet' || network === 'test'
+        ? StellarSdk.Networks.TESTNET
+        : StellarSdk.Networks.PUBLIC;
+      const passphraseArg = `--network-passphrase ${JSON.stringify(passphrase)}`;
       try {
         if (network === 'testnet') {
-          // For testnet, create and fund the account automatically
-          await execAsync(`stellar keys generate --global ${this.defaultKeypairName} --network ${network} --fund`);
+          // For testnet, create and fund the account (passphrase + RPC URL required for --fund)
+          await execAsync(
+            `stellar keys generate ${this.defaultKeypairName} --network ${network} ${passphraseArg} --fund`,
+            { env }
+          );
           console.log(`Created and funded default keypair: ${this.defaultKeypairName}`);
         } else {
-          // For mainnet, just create (don't auto-fund)
-          await execAsync(`stellar keys generate --global ${this.defaultKeypairName} --network ${network}`);
+          await execAsync(
+            `stellar keys generate ${this.defaultKeypairName} --network ${network} ${passphraseArg}`,
+            { env }
+          );
           console.log(`Created default keypair: ${this.defaultKeypairName}`);
         }
         return true;
       } catch (createError) {
-        console.error(`Failed to create default keypair: ${createError.message}`);
-        return false;
+        const detail = createError.stderr || createError.message || String(createError);
+        console.error(`Failed to create default keypair: ${detail}`);
+        throw new Error(`Keypair creation failed: ${detail}`);
       }
     }
   }
@@ -226,18 +254,15 @@ class DeploymentService {
 
       log('info', `Starting deployment to ${network}...`);
 
-      // Ensure default keypair exists
-      const keypairExists = await this.ensureDefaultKeypair(network);
-      if (!keypairExists) {
-        log('error', 'Failed to ensure default keypair exists');
-        throw new Error('Failed to create default keypair');
-      }
+      // Ensure default keypair exists (throws with CLI detail on failure)
+      await this.ensureDefaultKeypair(network);
 
       // For testnet, ensure the account has enough XLM for deployment
       if (network === 'testnet') {
         try {
           log('info', 'Ensuring testnet account has sufficient XLM...');
-          await execAsync(`stellar keys fund ${this.defaultKeypairName} --network ${network}`);
+          const env = getStellarEnv(network);
+          await execAsync(`stellar keys fund ${this.defaultKeypairName} --network ${network}`, { env });
           log('info', 'Account funding verified/completed');
         } catch (fundError) {
           log('warning', `Account funding failed: ${fundError.message}`);
@@ -299,14 +324,15 @@ class DeploymentService {
       
       log('debug', `Deploy command: ${deployCommand}`);
       
-      // Execute deployment command with real-time output streaming
+      // Execute deployment command with real-time output streaming (passphrase required when using RPC)
+      const deployEnv = getStellarEnv(network);
       const deployProcess = spawn('stellar', [
         'contract', 'deploy',
         '--wasm', wasmPath,
         '--source-account', this.defaultKeypairName,
         '--network', network,
         '--alias', projectId
-      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      ], { stdio: ['pipe', 'pipe', 'pipe'], env: deployEnv });
 
       let deployOutput = '';
       let deployError = '';
@@ -692,7 +718,8 @@ class DeploymentService {
 
       log('info', `Invoke command: ${invokeCommand}`);
       
-      const { stdout, stderr } = await execAsync(invokeCommand);
+      const env = getStellarEnv(network);
+      const { stdout, stderr } = await execAsync(invokeCommand, { env });
       
       if (stderr) {
         log('warning', `Stderr: ${stderr}`);
@@ -762,7 +789,8 @@ class DeploymentService {
       
       log('debug', `Install command: ${installCommand}`);
       
-      const { stdout, stderr } = await execAsync(installCommand);
+      const env = getStellarEnv(network);
+      const { stdout, stderr } = await execAsync(installCommand, { env });
       
       if (stderr) {
         log('warning', `Stderr: ${stderr}`);
@@ -835,7 +863,8 @@ class DeploymentService {
       
       log('debug', `Deploy command: ${deployCommand}`);
       
-      const { stdout, stderr } = await execAsync(deployCommand);
+      const env = getStellarEnv(network);
+      const { stdout, stderr } = await execAsync(deployCommand, { env });
       
       if (stderr) {
         log('warning', `Stderr: ${stderr}`);
