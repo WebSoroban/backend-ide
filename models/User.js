@@ -16,10 +16,20 @@ const userSchema = new mongoose.Schema({
   },
   authMethod: {
     type: String,
-    enum: ['gmail', 'wallet', 'both'],
+    enum: ['gmail', 'github', 'discord', 'wallet', 'both'],
     default: 'gmail'
   },
   googleId: {
+    type: String,
+    default: null,
+    sparse: true
+  },
+  githubId: {
+    type: String,
+    default: null,
+    sparse: true
+  },
+  discordId: {
     type: String,
     default: null,
     sparse: true
@@ -113,6 +123,8 @@ const userSchema = new mongoose.Schema({
 // Indexes for faster queries (email already has unique index, so we skip it)
 userSchema.index({ walletAddress: 1 }, { sparse: true });
 userSchema.index({ googleId: 1 }, { sparse: true });
+userSchema.index({ githubId: 1 }, { sparse: true });
+userSchema.index({ discordId: 1 }, { sparse: true });
 userSchema.index({ 'subscription.plan': 1, 'subscription.status': 1 });
 
 // Method to update subscription plan

@@ -2,9 +2,34 @@ const express = require('express');
 const router = express.Router();
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const GitHubStrategy = require('passport-github2').Strategy;
+const DiscordStrategy = require('passport-discord').Strategy;
 const User = require('../models/User');
 const { generateToken, generateChallenge } = require('../utils/auth');
 const { authenticate } = require('../middleware/auth');
+
+function hasOAuthProvider(user) {
+  return !!(user && (user.googleId || user.githubId || user.discordId));
+}
+
+function oauthSuccessRedirect(req, res, providerLabel) {
+  try {
+    const user = req.user;
+    const token = generateToken(user);
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${frontendUrl}/auth/callback?token=${token}&success=true`);
+  } catch (error) {
+    console.error(`${providerLabel} OAuth callback error:`, error);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${frontendUrl}/auth/callback?success=false&error=${encodeURIComponent(error.message)}`);
+  }
+}
 
 // Configure Google OAuth Strategy
 passport.use(new GoogleStrategy({
@@ -57,6 +82,111 @@ passport.use(new GoogleStrategy({
   }
 }));
 
+if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+  passport.use(new GitHubStrategy({
+    clientID: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+    callbackURL: process.env.GITHUB_CALLBACK_URL || '/api/auth/github/callback'
+  }, async (accessToken, refreshToken, profile, done) => {
+    try {
+      const githubId = String(profile.id);
+      let email = profile.emails && profile.emails[0] && profile.emails[0].value
+        ? profile.emails[0].value.toLowerCase().trim()
+        : `${githubId}+${profile.username || 'user'}@users.noreply.github.com`;
+      const displayName = profile.displayName || profile.username || 'GitHub User';
+      const picture = profile.photos && profile.photos[0] ? profile.photos[0].value : null;
+
+      let user = await User.findOne({ githubId });
+      if (!user) {
+        user = await User.findOne({ email });
+        if (user) {
+          user.githubId = githubId;
+          user.authMethod = user.walletAddress ? 'both' : 'github';
+          user.name = displayName;
+          if (picture) user.picture = picture;
+          await user.save();
+        } else {
+          user = new User({
+            email,
+            githubId,
+            authMethod: 'github',
+            name: displayName,
+            picture,
+            subscription: {
+              plan: 'free',
+              status: 'active'
+            }
+          });
+          user.updateUsageLimits('free');
+          await user.save();
+        }
+      } else {
+        user.lastLogin = new Date();
+        user.name = displayName;
+        if (picture) user.picture = picture;
+        await user.save();
+      }
+      return done(null, user);
+    } catch (error) {
+      return done(error, null);
+    }
+  }));
+}
+
+if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
+  passport.use(new DiscordStrategy({
+    clientID: process.env.DISCORD_CLIENT_ID,
+    clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    callbackURL: process.env.DISCORD_CALLBACK_URL || '/api/auth/discord/callback',
+    scope: ['identify', 'email']
+  }, async (accessToken, refreshToken, profile, done) => {
+    try {
+      const discordId = String(profile.id);
+      const email = profile.email
+        ? profile.email.toLowerCase().trim()
+        : `discord_${discordId}@oauth.local`;
+      const displayName = profile.global_name || profile.username || 'Discord User';
+      const picture = profile.avatar
+        ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.png`
+        : null;
+
+      let user = await User.findOne({ discordId });
+      if (!user) {
+        user = await User.findOne({ email });
+        if (user) {
+          user.discordId = discordId;
+          user.authMethod = user.walletAddress ? 'both' : 'discord';
+          user.name = displayName;
+          if (picture) user.picture = picture;
+          await user.save();
+        } else {
+          user = new User({
+            email,
+            discordId,
+            authMethod: 'discord',
+            name: displayName,
+            picture,
+            subscription: {
+              plan: 'free',
+              status: 'active'
+            }
+          });
+          user.updateUsageLimits('free');
+          await user.save();
+        }
+      } else {
+        user.lastLogin = new Date();
+        user.name = displayName;
+        if (picture) user.picture = picture;
+        await user.save();
+      }
+      return done(null, user);
+    } catch (error) {
+      return done(error, null);
+    }
+  }));
+}
+
 // Serialize user for session
 passport.serializeUser((user, done) => {
   done(null, user._id);
@@ -86,28 +216,55 @@ router.get('/google', passport.authenticate('google', {
  */
 router.get('/google/callback',
   passport.authenticate('google', { session: false }),
-  (req, res) => {
-    try {
-      const user = req.user;
-      const token = generateToken(user);
-      
-      // Set cookie
-      res.cookie('token', token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-      });
-      
-      // Redirect to frontend with token
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      res.redirect(`${frontendUrl}/auth/callback?token=${token}&success=true`);
-    } catch (error) {
-      console.error('Google OAuth callback error:', error);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      res.redirect(`${frontendUrl}/auth/callback?success=false&error=${encodeURIComponent(error.message)}`);
-    }
+  (req, res) => oauthSuccessRedirect(req, res, 'Google')
+);
+
+/**
+ * GET /api/auth/github
+ */
+router.get('/github', (req, res, next) => {
+  if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+    return res.status(503).json({ success: false, error: 'GitHub sign-in is not configured' });
   }
+  passport.authenticate('github', { scope: ['user:email'] })(req, res, next);
+});
+
+/**
+ * GET /api/auth/github/callback
+ */
+router.get('/github/callback',
+  (req, res, next) => {
+    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      return res.redirect(`${frontendUrl}/auth/callback?success=false&error=${encodeURIComponent('GitHub sign-in is not configured')}`);
+    }
+    passport.authenticate('github', { session: false })(req, res, next);
+  },
+  (req, res) => oauthSuccessRedirect(req, res, 'GitHub')
+);
+
+/**
+ * GET /api/auth/discord
+ */
+router.get('/discord', (req, res, next) => {
+  if (!process.env.DISCORD_CLIENT_ID || !process.env.DISCORD_CLIENT_SECRET) {
+    return res.status(503).json({ success: false, error: 'Discord sign-in is not configured' });
+  }
+  passport.authenticate('discord', { scope: ['identify', 'email'] })(req, res, next);
+});
+
+/**
+ * GET /api/auth/discord/callback
+ */
+router.get('/discord/callback',
+  (req, res, next) => {
+    if (!process.env.DISCORD_CLIENT_ID || !process.env.DISCORD_CLIENT_SECRET) {
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      return res.redirect(`${frontendUrl}/auth/callback?success=false&error=${encodeURIComponent('Discord sign-in is not configured')}`);
+    }
+    passport.authenticate('discord', { session: false })(req, res, next);
+  },
+  (req, res) => oauthSuccessRedirect(req, res, 'Discord')
 );
 
 /**
@@ -212,7 +369,7 @@ router.post('/wallet/verify', async (req, res) => {
       if (user) {
         // Link wallet to existing user
         user.walletAddress = walletAddress;
-        user.authMethod = user.googleId ? 'both' : 'wallet';
+        user.authMethod = hasOAuthProvider(user) ? 'both' : 'wallet';
         await user.save();
       }
       
@@ -366,11 +523,7 @@ router.post('/link-wallet', authenticate, async (req, res) => {
     
     // Link wallet to user
     user.walletAddress = walletAddress;
-    if (user.googleId) {
-      user.authMethod = 'both';
-    } else {
-      user.authMethod = 'wallet';
-    }
+    user.authMethod = hasOAuthProvider(user) ? 'both' : 'wallet';
     await user.save();
     
     res.json({
