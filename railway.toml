@@ -4,7 +4,9 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 # Apply any pending Prisma migrations, then start the API server.
-startCommand = "npx prisma migrate deploy && npm start"
+# Run node directly (not via `npm start`) so the server's stdout/stderr stream
+# straight to Railway logs instead of being buffered through npm.
+startCommand = "npx prisma migrate deploy && node dist/server.js"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
