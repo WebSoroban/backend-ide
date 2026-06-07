@@ -14,23 +14,6 @@ services:
       retries: 5
       start_period: 10s
 
-  mongodb:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_DATABASE=soroban-ide
-    volumes:
-      - mongodb_data:/data/db
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    profiles:
-      - local-mongodb
-
   api:
     build:
       context: .
@@ -42,7 +25,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017/soroban-ide}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     dns:
@@ -65,9 +47,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfiles/Dockerfile.worker
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017/soroban-ide}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - WORKER_TYPE=compile
@@ -86,9 +69,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfiles/Dockerfile.worker
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017/soroban-ide}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - WORKER_TYPE=deploy
@@ -103,39 +87,6 @@ services:
     deploy:
       replicas: 1
 
-  indexer-worker:
-    build:
-      context: .
-      dockerfile: Dockerfiles/Dockerfile.worker
-    environment:
-      - NODE_ENV=production
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017/soroban-ide}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - SOROBAN_RPC_URL=${SOROBAN_RPC_URL:-https://soroban-testnet.stellar.org}
-      - INDEXER_INTERVAL_MS=${INDEXER_INTERVAL_MS:-15000}
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    command: ["node", "workers/indexerWorker.js"]
-
-  webhook-worker:
-    build:
-      context: .
-      dockerfile: Dockerfiles/Dockerfile.worker
-    environment:
-      - NODE_ENV=production
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017/soroban-ide}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - WEBHOOK_WORKER_CONCURRENCY=${WEBHOOK_WORKER_CONCURRENCY:-3}
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    command: ["node", "workers/webhookWorker.js"]
-
   compiler:
     build:
       context: .
@@ -148,7 +99,4 @@ services:
       - build-only
 
 volumes:
-  mongodb_data:
   redis_data:
-
- 

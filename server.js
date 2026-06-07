@@ -4,7 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const passport = require('passport');
-const mongoose = require('mongoose');
+const prisma = require('./lib/prisma');
 require('dotenv').config();
 
 const app = express();
@@ -86,16 +86,19 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(passport.initialize());
 
-// MongoDB connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/soroban-ide';
-mongoose.connect(MONGODB_URI);
-
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+app.get('/api/health', async (req, res) => {
+  let database = 'disconnected';
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    database = 'connected';
+  } catch (_) {
+    database = 'disconnected';
+  }
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    database
   });
 });
 
@@ -113,13 +116,7 @@ app.use('/api/premium-gifts', require('./routes/premium-gifts'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/usage', require('./routes/usage'));
 app.use('/api/contracts', require('./routes/contracts'));
-
-// Phase 1: Developer infrastructure
-app.use('/api/apikeys', require('./routes/apikeys'));
-app.use('/api/rpc', require('./routes/rpc'));
-app.use('/api/accounts', require('./routes/accounts'));
-app.use('/api/transactions', require('./routes/transactions'));
-app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/wallet', require('./routes/wallet'));
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -165,13 +162,12 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
   console.log(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
-  console.log(`MongoDB URI: ${MONGODB_URI}`);
+  console.log(`Database: Neon Postgres (Prisma)`);
   console.log(`Available routes:`);
   console.log(`  - GET  /api/health`);
-  console.log(`  - POST /api/invites/check`);
-  console.log(`  - POST /api/invites/validate`);
-  console.log(`  - POST /api/invites/send`);
-  console.log(`  - GET  /api/invites`);
+  console.log(`  - GET  /api/wallet/me`);
+  console.log(`  - POST /api/wallet/ensure`);
+  console.log(`  - POST /api/wallet/fund`);
   
   // Verify Socket.IO is working
   console.log(`Socket.IO namespace: ${io.name}`);

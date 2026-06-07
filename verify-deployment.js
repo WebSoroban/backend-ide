@@ -15,7 +15,8 @@ const requiredFiles = [
   'routes/templates.js',
   'services/compilationService.js',
   'services/deploymentService.js',
-  'models/Project.js'
+  'prisma/schema.prisma',
+  'lib/prisma.js'
 ];
 
 let allFilesExist = true;
