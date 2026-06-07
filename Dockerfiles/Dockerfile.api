@@ -14,13 +14,17 @@ COPY package*.json ./
 # Prisma schema is required by the postinstall `prisma generate`
 COPY prisma ./prisma
 
-# Install dependencies (postinstall runs `prisma generate`)
+# Install dependencies, including devDependencies (typescript) needed to build.
+# postinstall runs `prisma generate`.
 # Using npm install instead of npm ci to handle lockfile sync issues
 # TODO: Update package-lock.json locally and switch back to npm ci
-RUN npm install --only=production --legacy-peer-deps
+RUN npm install --legacy-peer-deps
 
 # Copy app source (node_modules excluded via .dockerignore)
 COPY . .
+
+# Compile TypeScript -> dist/ (build script = `prisma generate && tsc`)
+RUN npm run build
 
 # Create necessary directories
 RUN mkdir -p /app/temp /app/logs
@@ -32,6 +36,6 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3001/api/health || exit 1
 
-# Start the API server
-CMD ["node", "server.js"]
+# Start the API server (compiled output)
+CMD ["node", "dist/server.js"]
 

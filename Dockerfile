@@ -34,13 +34,17 @@ COPY package*.json ./
 # Prisma schema is required by the postinstall `prisma generate`
 COPY prisma ./prisma
 
-# Install Node dependencies (postinstall runs `prisma generate`)
+# Install Node dependencies, including devDependencies (typescript) needed to
+# build the project. postinstall runs `prisma generate`.
 RUN npm cache clean --force \
-    && npm install --production --no-optional \
+    && npm install --no-optional \
     && npm cache clean --force
 
 # Copy application files
 COPY . .
+
+# Compile TypeScript -> dist/ (build script = `prisma generate && tsc`)
+RUN npm run build
 
 # Copy and make compile script executable
 COPY scripts/compile.sh /usr/local/bin/compile.sh
