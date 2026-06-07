@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User');
-const UsageLog = require('../models/UsageLog');
+const prisma = require('../lib/prisma');
+const userService = require('../services/userService');
+const { withId } = require('../lib/serialize');
 const { authenticate } = require('../middleware/auth');
 
 /**
@@ -11,16 +12,18 @@ const { authenticate } = require('../middleware/auth');
 router.get('/', authenticate, async (req, res) => {
   try {
     const user = req.user;
-    
+    const usage = userService.normalizeUsage(user.usage, user.subscription?.plan);
+
     // Get usage logs for last 30 days
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const logs = await UsageLog.find({
-      userId: user._id,
-      createdAt: { $gte: thirtyDaysAgo }
-    }).sort({ createdAt: -1 }).limit(100);
-    
+
+    const logs = await prisma.usageLog.findMany({
+      where: { userId: user.id, createdAt: { gte: thirtyDaysAgo } },
+      orderBy: { createdAt: 'desc' },
+      take: 100
+    });
+
     // Calculate statistics
     const stats = {
       deployments: {
@@ -39,29 +42,29 @@ router.get('/', authenticate, async (req, res) => {
         failed: logs.filter(l => l.action === 'function_test' && !l.success).length
       }
     };
-    
+
     res.json({
       success: true,
       usage: {
         deployments: {
-          count: user.usage.deployments.count,
-          limit: user.usage.deployments.limit,
-          remaining: user.usage.deployments.limit === -1 
-            ? 'unlimited' 
-            : Math.max(0, user.usage.deployments.limit - user.usage.deployments.count),
-          lastResetDate: user.usage.deployments.lastResetDate
+          count: usage.deployments.count,
+          limit: usage.deployments.limit,
+          remaining: usage.deployments.limit === -1
+            ? 'unlimited'
+            : Math.max(0, usage.deployments.limit - usage.deployments.count),
+          lastResetDate: usage.deployments.lastResetDate
         },
         functionTests: {
-          count: user.usage.functionTests.count,
-          limit: user.usage.functionTests.limit,
-          remaining: user.usage.functionTests.limit === -1 
-            ? 'unlimited' 
-            : Math.max(0, user.usage.functionTests.limit - user.usage.functionTests.count),
-          lastResetDate: user.usage.functionTests.lastResetDate
+          count: usage.functionTests.count,
+          limit: usage.functionTests.limit,
+          remaining: usage.functionTests.limit === -1
+            ? 'unlimited'
+            : Math.max(0, usage.functionTests.limit - usage.functionTests.count),
+          lastResetDate: usage.functionTests.lastResetDate
         }
       },
       statistics: stats,
-      logs: logs.slice(0, 20) // Return last 20 logs
+      logs: logs.slice(0, 20).map(withId)
     });
   } catch (error) {
     console.error('Get usage error:', error);
@@ -82,17 +85,13 @@ router.get('/summary', async (req, res) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    // Fetch recent logs for all users
-    const logs = await UsageLog.find({
-      createdAt: { $gte: thirtyDaysAgo }
-    }).sort({ createdAt: -1 }).limit(2000);
+    const logs = await prisma.usageLog.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      orderBy: { createdAt: 'desc' },
+      take: 2000
+    });
 
-    const totals = {
-      compile: 0,
-      deploy: 0,
-      function_test: 0
-    };
-
+    const totals = { compile: 0, deploy: 0, function_test: 0 };
     const dailyMap = new Map();
     const uniqueUsers = new Set();
 
@@ -100,28 +99,15 @@ router.get('/summary', async (req, res) => {
       if (!log || !log.action || !log.createdAt) continue;
 
       const action = log.action;
-      if (totals[action] !== undefined) {
-        totals[action] += 1;
-      }
-
-      if (log.userId) {
-        uniqueUsers.add(String(log.userId));
-      }
+      if (totals[action] !== undefined) totals[action] += 1;
+      if (log.userId) uniqueUsers.add(String(log.userId));
 
       const dateKey = log.createdAt.toISOString().slice(0, 10);
       if (!dailyMap.has(dateKey)) {
-        dailyMap.set(dateKey, {
-          date: dateKey,
-          compile: 0,
-          deploy: 0,
-          function_test: 0
-        });
+        dailyMap.set(dateKey, { date: dateKey, compile: 0, deploy: 0, function_test: 0 });
       }
-
       const day = dailyMap.get(dateKey);
-      if (day[action] !== undefined) {
-        day[action] += 1;
-      }
+      if (day[action] !== undefined) day[action] += 1;
     }
 
     const daily = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
@@ -154,14 +140,14 @@ router.get('/summary', async (req, res) => {
 router.get('/activity', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-    const logs = await UsageLog.find({})
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .populate('userId', 'email name')
-      .lean();
+    const logs = await prisma.usageLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: { user: { select: { email: true, name: true } } }
+    });
 
     const activity = logs.map((log) => ({
-      _id: log._id,
+      _id: log.id,
       action: log.action,
       projectId: log.projectId,
       contractAddress: log.contractAddress,
@@ -169,9 +155,7 @@ router.get('/activity', async (req, res) => {
       success: log.success,
       error: log.error,
       createdAt: log.createdAt,
-      user: log.userId
-            ? { email: log.userId.email, name: log.userId.name || null }
-            : null
+      user: log.user ? { email: log.user.email, name: log.user.name || null } : null
     }));
 
     res.json({ success: true, logs: activity });

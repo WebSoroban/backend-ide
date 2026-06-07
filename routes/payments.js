@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const Payment = require('../models/Payment');
+const prisma = require('../lib/prisma');
 const paymentService = require('../services/paymentService');
 const { authenticate } = require('../middleware/auth');
 
@@ -34,9 +34,10 @@ router.post('/verify', authenticate, async (req, res) => {
     const result = await paymentService.processPayment(txHash, user._id, plan);
     
     if (result.success) {
-      // Refresh user data
-      await user.populate('subscription');
-      
+      // Refresh user data to reflect the upgraded subscription
+      const refreshed = await prisma.user.findUnique({ where: { id: user.id } });
+      const sub = refreshed?.subscription || {};
+
       res.json({
         success: true,
         message: result.message,
@@ -46,9 +47,9 @@ router.post('/verify', authenticate, async (req, res) => {
           amount: result.payment.amount
         },
         subscription: {
-          plan: user.subscription.plan,
-          status: user.subscription.status,
-          endDate: user.subscription.endDate
+          plan: sub.plan,
+          status: sub.status,
+          endDate: sub.endDate
         }
       });
     } else {
@@ -87,7 +88,7 @@ router.post('/verify-template', authenticate, async (req, res) => {
 
     if (result.success) {
       // Refresh user to get updated purchasedTemplates
-      const updatedUser = await require('../models/User').findById(user._id);
+      const updatedUser = await prisma.user.findUnique({ where: { id: user.id } });
       return res.json({
         success: true,
         message: result.message,
@@ -117,7 +118,7 @@ router.post('/verify-template', authenticate, async (req, res) => {
 router.get('/history', authenticate, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
-    const result = await paymentService.monitorPayments(req.user._id, limit);
+    const result = await paymentService.monitorPayments(req.user.id, limit);
     
     if (result.success) {
       res.json({
@@ -147,14 +148,14 @@ router.get('/history', authenticate, async (req, res) => {
 router.get('/all', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-    const payments = await Payment.find({})
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .populate('userId', 'email name')
-      .lean();
+    const payments = await prisma.payment.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: { user: { select: { email: true, name: true } } }
+    });
 
     const list = payments.map((p) => ({
-      _id: p._id,
+      _id: p.id,
       plan: p.plan,
       amount: p.amount,
       currency: p.currency,
@@ -165,7 +166,7 @@ router.get('/all', async (req, res) => {
       toAddress: p.toAddress,
       confirmedAt: p.confirmedAt,
       createdAt: p.createdAt,
-      user: p.userId ? { email: p.userId.email, name: p.userId.name || null } : null
+      user: p.user ? { email: p.user.email, name: p.user.name || null } : null
     }));
 
     res.json({ success: true, payments: list });

@@ -1,4 +1,4 @@
-const User = require('../models/User');
+const prisma = require('../lib/prisma');
 const { verifyToken } = require('../utils/auth');
 
 /**
@@ -8,8 +8,8 @@ const { verifyToken } = require('../utils/auth');
 async function authenticate(req, res, next) {
   try {
     // Get token from Authorization header or cookie
-    const token = req.headers.authorization?.replace('Bearer ', '') || 
-                  req.cookies?.token || 
+    const token = req.headers.authorization?.replace('Bearer ', '') ||
+                  req.cookies?.token ||
                   req.query?.token;
 
     if (!token) {
@@ -31,7 +31,7 @@ async function authenticate(req, res, next) {
     }
 
     // Get user from database
-    const user = await User.findById(decoded.userId);
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
     if (!user || !user.isActive) {
       return res.status(401).json({
         success: false,
@@ -42,8 +42,8 @@ async function authenticate(req, res, next) {
 
     // Attach user to request
     req.user = user;
-    req.userId = user._id.toString();
-    
+    req.userId = user.id;
+
     next();
   } catch (error) {
     console.error('Authentication error:', error);
@@ -61,21 +61,21 @@ async function authenticate(req, res, next) {
  */
 async function optionalAuth(req, res, next) {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '') || 
-                  req.cookies?.token || 
+    const token = req.headers.authorization?.replace('Bearer ', '') ||
+                  req.cookies?.token ||
                   req.query?.token;
 
     if (token) {
       const decoded = verifyToken(token);
       if (decoded) {
-        const user = await User.findById(decoded.userId);
+        const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
         if (user && user.isActive) {
           req.user = user;
-          req.userId = user._id.toString();
+          req.userId = user.id;
         }
       }
     }
-    
+
     next();
   } catch (error) {
     // Continue without authentication if error occurs

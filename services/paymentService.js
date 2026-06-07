@@ -1,8 +1,6 @@
 const StellarSdk = require('@stellar/stellar-sdk');
-const Payment = require('../models/Payment');
-const Subscription = require('../models/Subscription');
-const User = require('../models/User');
-const TemplatePurchase = require('../models/TemplatePurchase');
+const prisma = require('../lib/prisma');
+const userService = require('./userService');
 const { getTemplateById, PRICE_BY_ID } = require('../data/templateCatalog');
 const emailService = require('./emailService');
 
@@ -174,15 +172,15 @@ class PaymentService {
   async processPayment(txHash, userId, plan) {
     try {
       // Check if payment already processed
-      const existingPayment = await Payment.findOne({ txHash });
+      const existingPayment = await prisma.payment.findUnique({ where: { txHash } });
       if (existingPayment && existingPayment.status === 'confirmed') {
         return {
           success: false,
           error: 'Payment already processed'
         };
       }
-      
-      const user = await User.findById(userId);
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
       if (!user) {
         return {
           success: false,
@@ -198,22 +196,22 @@ class PaymentService {
       
       if (!verification.success) {
         // Create payment record with failed status
-        await Payment.findOneAndUpdate(
-          { txHash },
-          {
-            userId,
-            plan,
-            amount: price,
-            txHash,
-            network: NETWORK,
-            fromAddress: verification.transaction?.from || 'unknown',
-            toAddress: PAYMENT_ADDRESS,
-            status: 'failed',
-            verified: false
-          },
-          { upsert: true, new: true }
-        );
-        
+        const failedData = {
+          userId,
+          plan,
+          amount: price,
+          network: NETWORK,
+          fromAddress: verification.transaction?.from || 'unknown',
+          toAddress: PAYMENT_ADDRESS,
+          status: 'failed',
+          verified: false
+        };
+        await prisma.payment.upsert({
+          where: { txHash },
+          update: failedData,
+          create: { ...failedData, txHash }
+        });
+
         return verification;
       }
       
@@ -244,71 +242,73 @@ class PaymentService {
         ledgerNumber = null;
       }
 
-      const payment = await Payment.findOneAndUpdate(
-        { txHash },
-        {
-          userId,
-          plan,
-          amount: price,
-          txHash,
-          network: NETWORK,
-          fromAddress: verification.transaction.from,
-          toAddress: verification.transaction.to,
-          status: 'confirmed',
-          confirmedAt: new Date(),
-          ...(ledgerNumber !== null && { blockNumber: ledgerNumber }),
-          memo: verification.transaction.memo,
-          verified: true,
-          verifiedAt: new Date()
-        },
-        { upsert: true, new: true }
-      );
-      
-      // Find or create subscription
-      let subscription = await Subscription.findOne({
+      const confirmedData = {
         userId,
         plan,
-        status: 'active'
-      }).sort({ createdAt: -1 });
-      
+        amount: price,
+        network: NETWORK,
+        fromAddress: verification.transaction.from,
+        toAddress: verification.transaction.to,
+        status: 'confirmed',
+        confirmedAt: new Date(),
+        ...(ledgerNumber !== null && { blockNumber: ledgerNumber }),
+        memo: verification.transaction.memo,
+        verified: true,
+        verifiedAt: new Date()
+      };
+      let payment = await prisma.payment.upsert({
+        where: { txHash },
+        update: confirmedData,
+        create: { ...confirmedData, txHash }
+      });
+
+      // Find or create subscription
+      let subscription = await prisma.subscription.findFirst({
+        where: { userId, plan, status: 'active' },
+        orderBy: { createdAt: 'desc' }
+      });
+
       if (!subscription) {
-        subscription = new Subscription({
-          userId,
-          plan,
-          status: 'active',
-          startDate: new Date(),
-          amount: price,
-          currency: 'XLM',
-          paymentTxHash: txHash,
-          paymentNetwork: NETWORK,
-          autoRenew: false
-        });
-        
         const endDate = new Date();
         endDate.setDate(endDate.getDate() + 30);
-        subscription.endDate = endDate;
+        subscription = await prisma.subscription.create({
+          data: {
+            userId,
+            plan,
+            status: 'active',
+            startDate: new Date(),
+            endDate,
+            amount: price,
+            currency: 'XLM',
+            paymentTxHash: txHash,
+            paymentNetwork: NETWORK,
+            autoRenew: false
+          }
+        });
       } else {
-        subscription.paymentTxHash = txHash;
-        subscription.paymentNetwork = NETWORK;
-        
         // Extend subscription if already active
+        let endDate;
         if (subscription.endDate && subscription.endDate > new Date()) {
-          subscription.endDate.setDate(subscription.endDate.getDate() + 30);
-        } else {
-          const endDate = new Date();
+          endDate = new Date(subscription.endDate);
           endDate.setDate(endDate.getDate() + 30);
-          subscription.endDate = endDate;
+        } else {
+          endDate = new Date();
+          endDate.setDate(endDate.getDate() + 30);
         }
+        subscription = await prisma.subscription.update({
+          where: { id: subscription.id },
+          data: { paymentTxHash: txHash, paymentNetwork: NETWORK, endDate }
+        });
       }
-      
-      await subscription.save();
-      
-      // Update user subscription
-      await user.updateSubscription(plan, txHash);
-      
+
+      // Update user subscription (denormalized JSON on the user)
+      await userService.updateSubscription(userId, plan, txHash);
+
       // Link payment to subscription
-      payment.subscriptionId = subscription._id;
-      await payment.save();
+      payment = await prisma.payment.update({
+        where: { id: payment.id },
+        data: { subscriptionId: subscription.id }
+      });
       
       // Generate and send receipt
       try {
@@ -362,7 +362,7 @@ class PaymentService {
    */
   async processTemplatePayment(txHash, purchaseId) {
     try {
-      const purchase = await TemplatePurchase.findById(purchaseId);
+      const purchase = await prisma.templatePurchase.findUnique({ where: { id: purchaseId } });
       if (!purchase) {
         return { success: false, error: 'Purchase not found' };
       }
@@ -378,21 +378,26 @@ class PaymentService {
 
       const verification = await this.verifyPayment(txHash, expectedAmount, memo);
       if (!verification.success) {
-        await TemplatePurchase.findByIdAndUpdate(purchaseId, { status: 'failed' });
+        await prisma.templatePurchase.update({ where: { id: purchaseId }, data: { status: 'failed' } });
         return verification;
       }
 
-      await TemplatePurchase.findByIdAndUpdate(purchaseId, {
-        status: 'confirmed',
-        txHash,
-        confirmedAt: new Date(),
-        network: process.env.PAYMENT_NETWORK || 'testnet'
+      await prisma.templatePurchase.update({
+        where: { id: purchaseId },
+        data: {
+          status: 'confirmed',
+          txHash,
+          confirmedAt: new Date(),
+          network: process.env.PAYMENT_NETWORK || 'testnet'
+        }
       });
 
-      const user = await User.findById(purchase.userId);
-      if (user && !user.purchasedTemplates.includes(purchase.templateId)) {
-        user.purchasedTemplates.push(purchase.templateId);
-        await user.save();
+      const user = await prisma.user.findUnique({ where: { id: purchase.userId } });
+      if (user && !(user.purchasedTemplates || []).includes(purchase.templateId)) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { purchasedTemplates: { push: purchase.templateId } }
+        });
       }
 
       // Send purchase confirmation email (non-blocking)
@@ -433,14 +438,16 @@ class PaymentService {
    */
   async monitorPayments(userId, limit = 10) {
     try {
-      const payments = await Payment.find({ userId })
-        .sort({ createdAt: -1 })
-        .limit(limit);
-      
+      const payments = await prisma.payment.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: limit
+      });
+
       return {
         success: true,
         payments: payments.map(p => ({
-          _id: p._id,
+          _id: p.id,
           plan: p.plan,
           amount: p.amount,
           currency: p.currency,

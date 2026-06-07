@@ -1,19 +1,21 @@
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
-const Job = require('../models/Job');
-const Project = require('../models/Project');
-const UsageLog = require('../models/UsageLog');
+const crypto = require('crypto');
+const prisma = require('../lib/prisma');
+const userService = require('../services/userService');
 const { addDeployJob } = require('../queues/deployQueue');
 const deploymentService = require('../services/deploymentService');
 const { authenticate } = require('../middleware/auth');
 
-// POST /api/deploy - Deploy a smart contract (queued)
+// Testnet only — mainnet is never allowed for server-side deploys.
+const NETWORK = 'testnet';
+
+// POST /api/deploy - Deploy a smart contract (queued, signed with the user's wallet)
 router.post('/', authenticate, async (req, res) => {
   try {
-    const { projectId, wasmBase64, network = 'testnet', walletInfo } = req.body;
+    const { projectId, wasmBase64 } = req.body;
     const user = req.user;
-    
+
     if (!projectId || !wasmBase64) {
       return res.status(400).json({
         success: false,
@@ -22,7 +24,7 @@ router.post('/', authenticate, async (req, res) => {
     }
 
     // Check deployment limit
-    const canDeploy = user.canDeploy();
+    const canDeploy = await userService.canDeploy(user);
     if (!canDeploy.allowed) {
       return res.status(403).json({
         success: false,
@@ -34,70 +36,66 @@ router.post('/', authenticate, async (req, res) => {
     }
 
     // Verify project belongs to user
-    const project = await Project.findById(projectId);
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true, userId: true }
+    });
     if (!project) {
       return res.status(404).json({
         success: false,
         error: 'Project not found'
       });
     }
-    
-    if (project.userId.toString() !== user._id.toString()) {
+
+    if (project.userId !== user.id) {
       return res.status(403).json({
         success: false,
         error: 'You do not have permission to deploy this project'
       });
     }
 
-    // Generate MongoDB ObjectId first
-    const jobId = new mongoose.Types.ObjectId();
-    const jobIdString = jobId.toString();
-    const bullJobId = `deploy-${jobIdString}`;
+    // Generate the job id up front so we can build the BullMQ job id.
+    const jobId = crypto.randomUUID();
+    const bullJobId = `deploy-${jobId}`;
 
-    // Enqueue deploy job (uses jobId to create BullMQ job ID)
+    // Enqueue deploy job (the worker signs with the user's wallet).
     const bullJob = await addDeployJob({
       projectId,
       wasmBase64,
-      network,
-      jobId: jobIdString,
-      walletInfo,
-      userId: user._id.toString()
+      network: NETWORK,
+      jobId,
+      userId: user.id
     });
 
-    // Verify BullMQ job was created
     if (!bullJob || !bullJob.id) {
       throw new Error('Failed to create BullMQ job');
     }
 
-    // Create job document in MongoDB with BullMQ job ID
-    const job = new Job({
-      _id: jobId,
-      type: 'deploy',
-      status: 'queued',
-      userId: user._id,
-      project: projectId,
-      bullJobId: bullJob.id || bullJobId
-    });
-    
-    await job.save();
-    
-    // Log usage attempt
-    const usageLog = new UsageLog({
-      userId: user._id,
-      action: 'deploy',
-      projectId,
-      success: false,
-      metadata: {
-        network,
-        jobId: jobIdString
+    const job = await prisma.job.create({
+      data: {
+        id: jobId,
+        type: 'deploy',
+        status: 'queued',
+        userId: user.id,
+        projectId,
+        bullJobId: bullJob.id || bullJobId
       }
     });
-    await usageLog.save();
 
-    // Return 202 Accepted with job ID and initial logs
+    // Log usage attempt (marked successful by the worker on completion).
+    await prisma.usageLog.create({
+      data: {
+        userId: user.id,
+        action: 'deploy',
+        projectId,
+        success: false,
+        metadata: { network: NETWORK, jobId }
+      }
+    });
+
     res.status(202).json({
       success: true,
-      jobId: job._id.toString(),
+      jobId: job.id,
       message: 'Deployment job queued',
       logs: [{
         type: 'info',
@@ -107,7 +105,7 @@ router.post('/', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Deployment queue error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to queue deployment job',
       message: error.message
@@ -115,11 +113,12 @@ router.post('/', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/deploy/prepare-deployment - Prepare deployment (compatibility route)
-router.post('/prepare-deployment', async (req, res) => {
+// POST /api/deploy/prepare-deployment - Synchronous deploy (signed with the user's wallet)
+router.post('/prepare-deployment', authenticate, async (req, res) => {
   try {
-    const { projectId, wasmBase64, network = 'testnet' } = req.body;
-    
+    const { projectId, wasmBase64 } = req.body;
+    const user = req.user;
+
     if (!projectId || !wasmBase64) {
       return res.status(400).json({
         success: false,
@@ -127,47 +126,58 @@ router.post('/prepare-deployment', async (req, res) => {
       });
     }
 
-    // Deploy contract directly using the simplified service
-    const deploymentResult = await deploymentService.deployContract(projectId, wasmBase64, network);
-    
-    // Update project with deployment info (optional - only if projectId is valid)
+    // Deploy contract directly, signing with this user's wallet.
+    const deploymentResult = await deploymentService.deployContract(
+      projectId,
+      wasmBase64,
+      NETWORK,
+      user.id
+    );
+
+    // Record deployment + update project if successful and projectId is a real project.
     if (deploymentResult.success && deploymentResult.contractAddress) {
       try {
-        // Check if projectId is a valid MongoDB ObjectId
-        if (projectId.match(/^[0-9a-fA-F]{24}$/)) {
-          await Project.findByIdAndUpdate(projectId, {
-            lastDeployed: new Date(),
-            contractAddress: deploymentResult.contractAddress,
-            $push: {
-              deploymentHistory: {
-                timestamp: new Date(),
-                contractAddress: deploymentResult.contractAddress,
-                status: 'success',
-                logs: deploymentResult.logs.map(log => log.message)
+        const project = await prisma.project.findUnique({
+          where: { id: projectId },
+          select: { id: true }
+        });
+        if (project) {
+          await prisma.project.update({
+            where: { id: projectId },
+            data: {
+              lastDeployed: new Date(),
+              contractAddress: deploymentResult.contractAddress,
+              deployments: {
+                create: {
+                  userId: user.id,
+                  contractAddress: deploymentResult.contractAddress,
+                  deployerPublicKey: deploymentResult.walletAddress,
+                  network: NETWORK,
+                  status: 'success',
+                  logs: (deploymentResult.logs || []).map((l) => l.message)
+                }
               }
             }
           });
         }
       } catch (updateError) {
         console.warn('Could not update project:', updateError.message);
-        // Continue with deployment even if project update fails
       }
     }
-    
+
     res.json({
       success: deploymentResult.success,
       contractAddress: deploymentResult.contractAddress,
       network: deploymentResult.network,
       projectId: deploymentResult.projectId,
       walletAddress: deploymentResult.walletAddress,
-      keypairName: deploymentResult.keypairName,
       logs: deploymentResult.logs,
       deployed: deploymentResult.success,
       isMock: deploymentResult.isMock || false
     });
   } catch (error) {
     console.error('Deployment preparation error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Deployment preparation failed',
       message: error.message
@@ -175,11 +185,11 @@ router.post('/prepare-deployment', async (req, res) => {
   }
 });
 
-// POST /api/deploy/invoke - Invoke a contract function
-router.post('/invoke', async (req, res) => {
+// POST /api/deploy/invoke - Invoke a contract function (read-only simulation)
+router.post('/invoke', authenticate, async (req, res) => {
   try {
-    const { contractId, functionName, args = [], sourceAccount, network = 'testnet' } = req.body;
-    
+    const { contractId, functionName, args = [] } = req.body;
+
     if (!contractId || !functionName) {
       return res.status(400).json({
         success: false,
@@ -187,9 +197,8 @@ router.post('/invoke', async (req, res) => {
       });
     }
 
-    // Invoke contract function
-    const invokeResult = await deploymentService.invokeContract(contractId, functionName, args, sourceAccount, network);
-    
+    const invokeResult = await deploymentService.invokeContract(contractId, functionName, args, null, NETWORK);
+
     res.json({
       success: invokeResult.success,
       output: invokeResult.output,
@@ -200,75 +209,9 @@ router.post('/invoke', async (req, res) => {
     });
   } catch (error) {
     console.error('Contract invocation error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Contract invocation failed',
-      message: error.message
-    });
-  }
-});
-
-// POST /api/deploy/upload-wasm - Upload WASM to network
-router.post('/upload-wasm', async (req, res) => {
-  try {
-    const { wasmBase64, sourceAccount, network = 'testnet' } = req.body;
-    
-    if (!wasmBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required parameter: wasmBase64'
-      });
-    }
-
-    // Upload WASM to network
-    const uploadResult = await deploymentService.uploadWasm(wasmBase64, sourceAccount, network);
-    
-    res.json({
-      success: uploadResult.success,
-      wasmHash: uploadResult.wasmHash,
-      network: uploadResult.network,
-      logs: uploadResult.logs,
-      isMock: uploadResult.isMock || false
-    });
-  } catch (error) {
-    console.error('WASM upload error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'WASM upload failed',
-      message: error.message
-    });
-  }
-});
-
-// POST /api/deploy/with-hash - Deploy using WASM hash
-router.post('/with-hash', async (req, res) => {
-  try {
-    const { wasmHash, alias, sourceAccount, network = 'testnet' } = req.body;
-    
-    if (!wasmHash || !alias) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required parameters: wasmHash and alias'
-      });
-    }
-
-    // Deploy using WASM hash
-    const deployResult = await deploymentService.deployWithWasmHash(wasmHash, alias, sourceAccount, network);
-    
-    res.json({
-      success: deployResult.success,
-      contractAddress: deployResult.contractAddress,
-      network: deployResult.network,
-      alias: deployResult.alias,
-      wasmHash: deployResult.wasmHash,
-      logs: deployResult.logs,
-      isMock: deployResult.isMock || false
-    });
-  } catch (error) {
-    console.error('Hash-based deployment error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Hash-based deployment failed',
       message: error.message
     });
   }
@@ -277,19 +220,17 @@ router.post('/with-hash', async (req, res) => {
 // GET /api/deploy/network-info - Get network information
 router.get('/network-info', async (req, res) => {
   try {
-    const { network = 'testnet' } = req.query;
-    
-    const networkInfo = await deploymentService.getNetworkInfo(network);
-    
+    const networkInfo = await deploymentService.getNetworkInfo(NETWORK);
+
     res.json({
       success: networkInfo.success,
-      network: networkInfo.network,
+      network: NETWORK,
       info: networkInfo.info,
       error: networkInfo.error
     });
   } catch (error) {
     console.error('Network info error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to get network info',
       message: error.message
@@ -297,24 +238,20 @@ router.get('/network-info', async (req, res) => {
   }
 });
 
-// GET /api/deploy/keypair-info - Get default keypair information
-router.get('/keypair-info', async (req, res) => {
+// GET /api/deploy/wallet-info - Get the logged-in user's deploy wallet (public info only)
+router.get('/wallet-info', authenticate, async (req, res) => {
   try {
-    const keypairInfo = await deploymentService.getDefaultKeypairInfo();
-    
-    res.json({
-      success: keypairInfo.success,
-      keypair: keypairInfo.keypair,
-      error: keypairInfo.error
-    });
+    const walletService = require('../services/wallet');
+    const info = await walletService.getPublicWalletInfo(req.userId);
+    res.json({ success: true, wallet: info });
   } catch (error) {
-    console.error('Keypair info error:', error);
-    res.status(500).json({ 
+    console.error('Wallet info error:', error);
+    res.status(500).json({
       success: false,
-      error: 'Failed to get keypair info',
+      error: 'Failed to get wallet info',
       message: error.message
     });
   }
 });
 
-module.exports = router; 
+module.exports = router;

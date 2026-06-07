@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const Project = require('../models/Project');
+const prisma = require('../lib/prisma');
+const { serializeProject } = require('../lib/serialize');
 const { authenticate } = require('../middleware/auth');
 const { FREE_TEMPLATE_IDS } = require('../data/templateCatalog');
 
@@ -9,11 +10,12 @@ router.get('/', authenticate, async (req, res) => {
   try {
     const user = req.user;
     // Get all projects for this user (exclude local projects from list view)
-    const projects = await Project.find({ 
-      userId: user._id,
-      isLocal: { $ne: true } 
-    }).sort({ updatedAt: -1 });
-    res.json(projects);
+    const projects = await prisma.project.findMany({
+      where: { userId: user.id, isLocal: false },
+      orderBy: { updatedAt: 'desc' },
+      include: { files: true, deployments: { orderBy: { createdAt: 'desc' } } }
+    });
+    res.json(projects.map(serializeProject));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch projects' });
   }
@@ -924,15 +926,22 @@ rustflags = [
       ];
     }
 
-    const project = new Project({
-      name: projectName,
-      userId: user._id,
-      files: defaultFiles,
-      isLocal: isLocal === true || isLocal === 'true'
+    const project = await prisma.project.create({
+      data: {
+        name: projectName,
+        userId: user.id,
+        isLocal: isLocal === true || isLocal === 'true',
+        files: {
+          create: defaultFiles.map((f) => ({
+            name: f.name,
+            type: f.type || 'file',
+            content: f.content || ''
+          }))
+        }
+      },
+      include: { files: true, deployments: true }
     });
-
-    const savedProject = await project.save();
-    res.status(201).json(savedProject);
+    res.status(201).json(serializeProject(project));
   } catch (error) {
     res.status(500).json({ error: 'Failed to create project' });
   }
@@ -942,17 +951,20 @@ rustflags = [
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const user = req.user;
-    const project = await Project.findById(req.params.id);
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      include: { files: true, deployments: { orderBy: { createdAt: 'desc' } } }
+    });
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
-    
+
     // Verify project belongs to user
-    if (project.userId.toString() !== user._id.toString()) {
+    if (project.userId !== user.id) {
       return res.status(403).json({ error: 'You do not have permission to access this project' });
     }
-    
-    res.json(project);
+
+    res.json(serializeProject(project));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch project' });
   }
@@ -963,28 +975,48 @@ router.put('/:id', authenticate, async (req, res) => {
   try {
     const user = req.user;
     const { name, files } = req.body;
-    
+
     // Verify project belongs to user
-    const existingProject = await Project.findById(req.params.id);
+    const existingProject = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, userId: true }
+    });
     if (!existingProject) {
       return res.status(404).json({ error: 'Project not found' });
     }
-    
-    if (existingProject.userId.toString() !== user._id.toString()) {
+
+    if (existingProject.userId !== user.id) {
       return res.status(403).json({ error: 'You do not have permission to update this project' });
     }
-    
-    const updateData = {};
-    if (name !== undefined) updateData.name = name;
-    if (files !== undefined) updateData.files = files;
-    
-    const project = await Project.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    );
-    
-    res.json(project);
+
+    // Update name and (if provided) replace the file set atomically.
+    await prisma.$transaction(async (tx) => {
+      if (name !== undefined) {
+        await tx.project.update({ where: { id: req.params.id }, data: { name } });
+      }
+      if (files !== undefined) {
+        await tx.file.deleteMany({ where: { projectId: req.params.id } });
+        if (Array.isArray(files) && files.length > 0) {
+          await tx.file.createMany({
+            data: files.map((f) => ({
+              projectId: req.params.id,
+              name: f.name,
+              type: f.type || 'file',
+              content: f.content || ''
+            }))
+          });
+        }
+        // Touch updatedAt even if name wasn't changed.
+        await tx.project.update({ where: { id: req.params.id }, data: { updatedAt: new Date() } });
+      }
+    });
+
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      include: { files: true, deployments: { orderBy: { createdAt: 'desc' } } }
+    });
+
+    res.json(serializeProject(project));
   } catch (error) {
     res.status(500).json({ error: 'Failed to update project' });
   }
@@ -994,18 +1026,22 @@ router.put('/:id', authenticate, async (req, res) => {
 router.delete('/:id', authenticate, async (req, res) => {
   try {
     const user = req.user;
-    
+
     // Verify project belongs to user
-    const project = await Project.findById(req.params.id);
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, userId: true }
+    });
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
-    
-    if (project.userId.toString() !== user._id.toString()) {
+
+    if (project.userId !== user.id) {
       return res.status(403).json({ error: 'You do not have permission to delete this project' });
     }
-    
-    await Project.findByIdAndDelete(req.params.id);
+
+    // Cascades to files and deployments.
+    await prisma.project.delete({ where: { id: req.params.id } });
     res.json({ message: 'Project deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete project' });

@@ -4,7 +4,9 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
 const DiscordStrategy = require('passport-discord').Strategy;
-const User = require('../models/User');
+const prisma = require('../lib/prisma');
+const userService = require('../services/userService');
+const walletService = require('../services/wallet');
 const { generateToken, generateChallenge } = require('../utils/auth');
 const { authenticate } = require('../middleware/auth');
 
@@ -12,9 +14,26 @@ function hasOAuthProvider(user) {
   return !!(user && (user.googleId || user.githubId || user.discordId));
 }
 
-function oauthSuccessRedirect(req, res, providerLabel) {
+/** Default JSON blobs for a brand-new free-plan user. */
+function newUserDefaults() {
+  return {
+    subscription: userService.defaultSubscription('free'),
+    usage: userService.defaultUsage('free')
+  };
+}
+
+async function oauthSuccessRedirect(req, res, providerLabel) {
   try {
     const user = req.user;
+
+    // On successful OAuth login, ensure the user has a funded testnet wallet.
+    // Never block login if wallet creation/funding fails.
+    try {
+      await walletService.getOrCreateWallet(user.id);
+    } catch (walletErr) {
+      console.error(`[Auth] Wallet provisioning failed for ${user.id}:`, walletErr.message);
+    }
+
     const token = generateToken(user);
     res.cookie('token', token, {
       httpOnly: true,
@@ -38,44 +57,45 @@ passport.use(new GoogleStrategy({
   callbackURL: process.env.GOOGLE_CALLBACK_URL || '/api/auth/google/callback'
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    // Find or create user
-    let user = await User.findOne({ googleId: profile.id });
-    
+    let user = await prisma.user.findUnique({ where: { googleId: profile.id } });
+
     if (!user) {
-      // Check if user exists with this email
-      user = await User.findOne({ email: profile.emails[0].value });
-      
+      const email = profile.emails[0].value;
+      user = await prisma.user.findUnique({ where: { email } });
+
       if (user) {
-        // Link Google account to existing user
-        user.googleId = profile.id;
-        user.authMethod = user.walletAddress ? 'both' : 'gmail';
-        user.name = profile.displayName;
-        user.picture = profile.photos[0]?.value;
-        await user.save();
-      } else {
-        // Create new user
-        user = new User({
-          email: profile.emails[0].value,
-          googleId: profile.id,
-          authMethod: 'gmail',
-          name: profile.displayName,
-          picture: profile.photos[0]?.value,
-          subscription: {
-            plan: 'free',
-            status: 'active'
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            googleId: profile.id,
+            authMethod: user.walletAddress ? 'both' : 'gmail',
+            name: profile.displayName,
+            picture: profile.photos[0]?.value
           }
         });
-        user.updateUsageLimits('free');
-        await user.save();
+      } else {
+        user = await prisma.user.create({
+          data: {
+            email,
+            googleId: profile.id,
+            authMethod: 'gmail',
+            name: profile.displayName,
+            picture: profile.photos[0]?.value,
+            ...newUserDefaults()
+          }
+        });
       }
     } else {
-      // Update last login
-      user.lastLogin = new Date();
-      user.name = profile.displayName;
-      user.picture = profile.photos[0]?.value;
-      await user.save();
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          lastLogin: new Date(),
+          name: profile.displayName,
+          picture: profile.photos[0]?.value
+        }
+      });
     }
-    
+
     return done(null, user);
   } catch (error) {
     return done(error, null);
@@ -90,41 +110,42 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
   }, async (accessToken, refreshToken, profile, done) => {
     try {
       const githubId = String(profile.id);
-      let email = profile.emails && profile.emails[0] && profile.emails[0].value
+      const email = profile.emails && profile.emails[0] && profile.emails[0].value
         ? profile.emails[0].value.toLowerCase().trim()
         : `${githubId}+${profile.username || 'user'}@users.noreply.github.com`;
       const displayName = profile.displayName || profile.username || 'GitHub User';
       const picture = profile.photos && profile.photos[0] ? profile.photos[0].value : null;
 
-      let user = await User.findOne({ githubId });
+      let user = await prisma.user.findUnique({ where: { githubId } });
       if (!user) {
-        user = await User.findOne({ email });
+        user = await prisma.user.findUnique({ where: { email } });
         if (user) {
-          user.githubId = githubId;
-          user.authMethod = user.walletAddress ? 'both' : 'github';
-          user.name = displayName;
-          if (picture) user.picture = picture;
-          await user.save();
-        } else {
-          user = new User({
-            email,
-            githubId,
-            authMethod: 'github',
-            name: displayName,
-            picture,
-            subscription: {
-              plan: 'free',
-              status: 'active'
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              githubId,
+              authMethod: user.walletAddress ? 'both' : 'github',
+              name: displayName,
+              ...(picture ? { picture } : {})
             }
           });
-          user.updateUsageLimits('free');
-          await user.save();
+        } else {
+          user = await prisma.user.create({
+            data: {
+              email,
+              githubId,
+              authMethod: 'github',
+              name: displayName,
+              picture,
+              ...newUserDefaults()
+            }
+          });
         }
       } else {
-        user.lastLogin = new Date();
-        user.name = displayName;
-        if (picture) user.picture = picture;
-        await user.save();
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLogin: new Date(), name: displayName, ...(picture ? { picture } : {}) }
+        });
       }
       return done(null, user);
     } catch (error) {
@@ -150,35 +171,36 @@ if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
         ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.png`
         : null;
 
-      let user = await User.findOne({ discordId });
+      let user = await prisma.user.findUnique({ where: { discordId } });
       if (!user) {
-        user = await User.findOne({ email });
+        user = await prisma.user.findUnique({ where: { email } });
         if (user) {
-          user.discordId = discordId;
-          user.authMethod = user.walletAddress ? 'both' : 'discord';
-          user.name = displayName;
-          if (picture) user.picture = picture;
-          await user.save();
-        } else {
-          user = new User({
-            email,
-            discordId,
-            authMethod: 'discord',
-            name: displayName,
-            picture,
-            subscription: {
-              plan: 'free',
-              status: 'active'
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              discordId,
+              authMethod: user.walletAddress ? 'both' : 'discord',
+              name: displayName,
+              ...(picture ? { picture } : {})
             }
           });
-          user.updateUsageLimits('free');
-          await user.save();
+        } else {
+          user = await prisma.user.create({
+            data: {
+              email,
+              discordId,
+              authMethod: 'discord',
+              name: displayName,
+              picture,
+              ...newUserDefaults()
+            }
+          });
         }
       } else {
-        user.lastLogin = new Date();
-        user.name = displayName;
-        if (picture) user.picture = picture;
-        await user.save();
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLogin: new Date(), name: displayName, ...(picture ? { picture } : {}) }
+        });
       }
       return done(null, user);
     } catch (error) {
@@ -189,13 +211,13 @@ if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
 
 // Serialize user for session
 passport.serializeUser((user, done) => {
-  done(null, user._id);
+  done(null, user.id);
 });
 
 // Deserialize user from session
 passport.deserializeUser(async (id, done) => {
   try {
-    const user = await User.findById(id);
+    const user = await prisma.user.findUnique({ where: { id } });
     done(null, user);
   } catch (error) {
     done(error, null);
@@ -274,26 +296,16 @@ router.get('/discord/callback',
 router.post('/wallet/challenge', async (req, res) => {
   try {
     const { walletAddress } = req.body;
-    
+
     if (!walletAddress) {
-      return res.status(400).json({
-        success: false,
-        error: 'Wallet address is required'
-      });
+      return res.status(400).json({ success: false, error: 'Wallet address is required' });
     }
-    
-    // Validate Stellar address format
+
     if (!walletAddress.startsWith('G') || walletAddress.length !== 56) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid Stellar wallet address format'
-      });
+      return res.status(400).json({ success: false, error: 'Invalid Stellar wallet address format' });
     }
-    
+
     const challenge = generateChallenge(walletAddress);
-    
-    // Store challenge in session/redis (in production, use Redis)
-    // For now, we'll return it and verify on the next step
     res.json({
       success: true,
       challenge: challenge.message,
@@ -302,125 +314,111 @@ router.post('/wallet/challenge', async (req, res) => {
     });
   } catch (error) {
     console.error('Wallet challenge error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to generate challenge',
-      message: error.message
-    });
+    res.status(500).json({ success: false, error: 'Failed to generate challenge', message: error.message });
   }
 });
 
 /**
  * POST /api/auth/wallet/verify
- * Verify wallet signature and authenticate
+ * Verify wallet signature and authenticate. NOTE: `walletAddress` here is the
+ * user's EXTERNAL connect-wallet used for sign-in — distinct from the
+ * server-managed deploy wallet.
  */
 router.post('/wallet/verify', async (req, res) => {
   try {
     const { walletAddress, signature, challenge, challengeTimestamp } = req.body;
-    
+
     if (!walletAddress || !signature || !challenge) {
       return res.status(400).json({
         success: false,
         error: 'Wallet address, signature, and challenge are required'
       });
     }
-    
-    // Validate Stellar address format
+
     if (!walletAddress.startsWith('G') || walletAddress.length !== 56) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid Stellar wallet address format'
-      });
+      return res.status(400).json({ success: false, error: 'Invalid Stellar wallet address format' });
     }
-    
-    // Verify challenge hasn't expired
+
     if (challengeTimestamp) {
-      const expiresAt = challengeTimestamp + (5 * 60 * 1000); // 5 minutes
+      const expiresAt = challengeTimestamp + (5 * 60 * 1000);
       if (Date.now() > expiresAt) {
-        return res.status(400).json({
-          success: false,
-          error: 'Challenge expired. Please request a new one.'
-        });
+        return res.status(400).json({ success: false, error: 'Challenge expired. Please request a new one.' });
       }
     }
-    
-    // TODO: Implement proper signature verification with Stellar SDK
-    // For now, we'll accept the signature if wallet address is valid
-    // In production, verify the signature properly
-    
-    // Find or create user
+
     const { email } = req.body;
-    
-    // Email is required
     if (!email || !email.trim() || !email.includes('@')) {
       return res.status(400).json({
         success: false,
         error: 'Email is required and must be a valid email address'
       });
     }
-    
+
     const normalizedEmail = email.toLowerCase().trim();
-    
-    let user = await User.findOne({ walletAddress });
-    
+
+    let user = await prisma.user.findUnique({ where: { walletAddress } });
+
     if (!user) {
-      // Check if user exists with email
-      user = await User.findOne({ email: normalizedEmail });
+      user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
       if (user) {
-        // Link wallet to existing user
-        user.walletAddress = walletAddress;
-        user.authMethod = hasOAuthProvider(user) ? 'both' : 'wallet';
-        await user.save();
-      }
-      
-      if (!user) {
-        // Create new user with wallet (email is required)
-        user = new User({
-          walletAddress,
-          authMethod: 'wallet',
-          email: normalizedEmail,
-          subscription: {
-            plan: 'free',
-            status: 'active'
+        // Link external wallet to existing user
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            walletAddress,
+            authMethod: hasOAuthProvider(user) ? 'both' : 'wallet'
           }
         });
-        user.updateUsageLimits('free');
-        await user.save();
+      } else {
+        // Create new user with external wallet (email required)
+        user = await prisma.user.create({
+          data: {
+            walletAddress,
+            authMethod: 'wallet',
+            email: normalizedEmail,
+            ...newUserDefaults()
+          }
+        });
       }
     } else {
-      // Update email if provided and different
       if (normalizedEmail !== user.email && !user.email.includes('@wallet.local')) {
-        // Check if email is already taken
-        const emailUser = await User.findOne({ email: normalizedEmail });
-        if (emailUser && emailUser._id.toString() !== user._id.toString()) {
+        const emailUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+        if (emailUser && emailUser.id !== user.id) {
           return res.status(400).json({
             success: false,
             error: 'This email is already associated with another account'
           });
         }
-        user.email = normalizedEmail;
-        await user.save();
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { email: normalizedEmail, lastLogin: new Date() }
+        });
+      } else {
+        user = await prisma.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
       }
-      // Update last login
-      user.lastLogin = new Date();
-      await user.save();
     }
-    
+
+    // Provision the server-managed deploy wallet on login (non-blocking on failure).
+    try {
+      await walletService.getOrCreateWallet(user.id);
+    } catch (walletErr) {
+      console.error(`[Auth] Wallet provisioning failed for ${user.id}:`, walletErr.message);
+    }
+
     const token = generateToken(user);
-    
-    // Set cookie
+
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      maxAge: 7 * 24 * 60 * 60 * 1000
     });
-    
+
     res.json({
       success: true,
       token,
       user: {
-        _id: user._id,
+        _id: user.id,
         email: user.email,
         walletAddress: user.walletAddress,
         name: user.name,
@@ -432,11 +430,7 @@ router.post('/wallet/verify', async (req, res) => {
     });
   } catch (error) {
     console.error('Wallet verification error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Wallet verification failed',
-      message: error.message
-    });
+    res.status(500).json({ success: false, error: 'Wallet verification failed', message: error.message });
   }
 });
 
@@ -447,11 +441,11 @@ router.post('/wallet/verify', async (req, res) => {
 router.get('/me', authenticate, async (req, res) => {
   try {
     const user = req.user;
-    
+
     res.json({
       success: true,
       user: {
-        _id: user._id,
+        _id: user.id,
         email: user.email,
         walletAddress: user.walletAddress,
         name: user.name,
@@ -466,11 +460,7 @@ router.get('/me', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get user',
-      message: error.message
-    });
+    res.status(500).json({ success: false, error: 'Failed to get user', message: error.message });
   }
 });
 
@@ -480,69 +470,49 @@ router.get('/me', authenticate, async (req, res) => {
  */
 router.post('/logout', authenticate, (req, res) => {
   res.clearCookie('token');
-  res.json({
-    success: true,
-    message: 'Logged out successfully'
-  });
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
 /**
  * POST /api/auth/link-wallet
- * Link wallet address to existing user account
+ * Link external wallet address to existing user account
  */
 router.post('/link-wallet', authenticate, async (req, res) => {
   try {
-    const { walletAddress, signature, challenge } = req.body;
+    const { walletAddress, signature } = req.body;
     const user = req.user;
-    
+
     if (!walletAddress || !signature) {
-      return res.status(400).json({
-        success: false,
-        error: 'Wallet address and signature are required'
-      });
+      return res.status(400).json({ success: false, error: 'Wallet address and signature are required' });
     }
-    
-    // Validate Stellar address format
+
     if (!walletAddress.startsWith('G') || walletAddress.length !== 56) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid Stellar wallet address format'
-      });
+      return res.status(400).json({ success: false, error: 'Invalid Stellar wallet address format' });
     }
-    
-    // Check if wallet is already linked to another account
-    const existingUser = await User.findOne({ walletAddress });
-    if (existingUser && existingUser._id.toString() !== user._id.toString()) {
-      return res.status(400).json({
-        success: false,
-        error: 'This wallet is already linked to another account'
-      });
+
+    const existingUser = await prisma.user.findUnique({ where: { walletAddress } });
+    if (existingUser && existingUser.id !== user.id) {
+      return res.status(400).json({ success: false, error: 'This wallet is already linked to another account' });
     }
-    
-    // TODO: Verify signature
-    
-    // Link wallet to user
-    user.walletAddress = walletAddress;
-    user.authMethod = hasOAuthProvider(user) ? 'both' : 'wallet';
-    await user.save();
-    
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { walletAddress, authMethod: hasOAuthProvider(user) ? 'both' : 'wallet' }
+    });
+
     res.json({
       success: true,
       message: 'Wallet linked successfully',
       user: {
-        _id: user._id,
-        email: user.email,
-        walletAddress: user.walletAddress,
-        authMethod: user.authMethod
+        _id: updated.id,
+        email: updated.email,
+        walletAddress: updated.walletAddress,
+        authMethod: updated.authMethod
       }
     });
   } catch (error) {
     console.error('Link wallet error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to link wallet',
-      message: error.message
-    });
+    res.status(500).json({ success: false, error: 'Failed to link wallet', message: error.message });
   }
 });
 

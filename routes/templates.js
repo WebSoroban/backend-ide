@@ -1,7 +1,7 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const crypto = require('crypto');
 const router = express.Router();
-const TemplatePurchase = require('../models/TemplatePurchase');
+const prisma = require('../lib/prisma');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const {
   TEMPLATE_CATALOG,
@@ -104,28 +104,27 @@ router.post('/purchase', authenticate, async (req, res) => {
     const paymentAddress = process.env.PAYMENT_ADDRESS || 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
     const network = process.env.PAYMENT_NETWORK || 'testnet';
 
-    const purchaseId = new mongoose.Types.ObjectId();
-    const memo = purchaseId.toString();
+    const memo = crypto.randomUUID();
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 30);
 
-    const purchase = new TemplatePurchase({
-      _id: purchaseId,
-      userId: user._id,
-      templateId,
-      amount: template.price,
-      currency: 'XLM',
-      status: 'pending',
-      memo,
-      network,
-      expiresAt
+    const purchase = await prisma.templatePurchase.create({
+      data: {
+        userId: user.id,
+        templateId,
+        amount: template.price,
+        currency: 'XLM',
+        status: 'pending',
+        memo,
+        network,
+        expiresAt
+      }
     });
-    await purchase.save();
 
     res.json({
       success: true,
-      purchaseId: purchase._id.toString(),
+      purchaseId: purchase.id,
       template: {
         id: template.id,
         name: template.name,

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User');
-const Subscription = require('../models/Subscription');
+const prisma = require('../lib/prisma');
+const userService = require('../services/userService');
 const { authenticate } = require('../middleware/auth');
 
 // Plan pricing (in XLM)
@@ -106,30 +106,29 @@ router.post('/create', authenticate, async (req, res) => {
     const price = PLAN_PRICES[plan];
     const paymentAddress = process.env.PAYMENT_ADDRESS || 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
     
-    // Create subscription record
-    const subscription = new Subscription({
-      userId: user._id,
-      plan,
-      status: 'active',
-      startDate: new Date(),
-      amount: price,
-      currency: 'XLM'
-    });
-    
-    // Set end date (30 days)
+    // Create subscription record (30-day term)
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + 30);
-    subscription.endDate = endDate;
-    
-    await subscription.save();
-    
+
+    const subscription = await prisma.subscription.create({
+      data: {
+        userId: user.id,
+        plan,
+        status: 'active',
+        startDate: new Date(),
+        endDate,
+        amount: price,
+        currency: 'XLM'
+      }
+    });
+
     // Generate payment memo (user ID for verification)
-    const memo = user._id.toString();
-    
+    const memo = user.id;
+
     res.json({
       success: true,
       subscription: {
-        _id: subscription._id,
+        _id: subscription.id,
         plan: subscription.plan,
         amount: subscription.amount,
         currency: subscription.currency
@@ -160,29 +159,33 @@ router.post('/create', authenticate, async (req, res) => {
 router.post('/cancel', authenticate, async (req, res) => {
   try {
     const user = req.user;
-    
-    if (user.subscription.plan === 'free') {
+
+    if ((user.subscription?.plan || 'free') === 'free') {
       return res.status(400).json({
         success: false,
         error: 'Cannot cancel free plan'
       });
     }
-    
+
     // Find active subscription
-    const subscription = await Subscription.findOne({
-      userId: user._id,
-      status: 'active'
-    }).sort({ createdAt: -1 });
-    
+    const subscription = await prisma.subscription.findFirst({
+      where: { userId: user.id, status: 'active' },
+      orderBy: { createdAt: 'desc' }
+    });
+
     if (subscription) {
-      subscription.status = 'cancelled';
-      subscription.cancelledAt = new Date();
-      subscription.cancelledReason = 'User requested cancellation';
-      await subscription.save();
+      await prisma.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          status: 'cancelled',
+          cancelledAt: new Date(),
+          cancelledReason: 'User requested cancellation'
+        }
+      });
     }
-    
+
     // Downgrade user to free plan
-    await user.updateSubscription('free');
+    await userService.updateSubscription(user.id, 'free');
     
     res.json({
       success: true,

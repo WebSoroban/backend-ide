@@ -1,34 +1,42 @@
 const express = require('express');
 const router = express.Router();
-const Job = require('../models/Job');
+const prisma = require('../lib/prisma');
+
+/** Attach a minimal { _id, name } project object to a job (replaces populate). */
+async function withProject(job) {
+  let project = null;
+  if (job.projectId) {
+    const p = await prisma.project.findUnique({
+      where: { id: job.projectId },
+      select: { id: true, name: true }
+    });
+    if (p) project = { _id: p.id, id: p.id, name: p.name };
+  }
+  return {
+    _id: job.id,
+    type: job.type,
+    status: job.status,
+    project,
+    result: job.result,
+    error: job.error,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt
+  };
+}
 
 // GET /api/jobs/:id - Get job status
 router.get('/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    
-    const job = await Job.findById(id).populate('project', 'name');
-    
+    const job = await prisma.job.findUnique({ where: { id: req.params.id } });
+
     if (!job) {
       return res.status(404).json({
         success: false,
         error: 'Job not found'
       });
     }
-    
-    res.json({
-      success: true,
-      job: {
-        _id: job._id,
-        type: job.type,
-        status: job.status,
-        project: job.project,
-        result: job.result,
-        error: job.error,
-        createdAt: job.createdAt,
-        updatedAt: job.updatedAt
-      }
-    });
+
+    res.json({ success: true, job: await withProject(job) });
   } catch (error) {
     console.error('Job fetch error:', error);
     res.status(500).json({
@@ -43,29 +51,21 @@ router.get('/:id', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { projectId, status, type, limit = 50 } = req.query;
-    
-    const query = {};
-    if (projectId) query.project = projectId;
-    if (status) query.status = status;
-    if (type) query.type = type;
-    
-    const jobs = await Job.find(query)
-      .populate('project', 'name')
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit, 10));
-    
+
+    const where = {};
+    if (projectId) where.projectId = projectId;
+    if (status) where.status = status;
+    if (type) where.type = type;
+
+    const jobs = await prisma.job.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: parseInt(limit, 10)
+    });
+
     res.json({
       success: true,
-      jobs: jobs.map(job => ({
-        _id: job._id,
-        type: job.type,
-        status: job.status,
-        project: job.project,
-        result: job.result,
-        error: job.error,
-        createdAt: job.createdAt,
-        updatedAt: job.updatedAt
-      }))
+      jobs: await Promise.all(jobs.map(withProject))
     });
   } catch (error) {
     console.error('Jobs list error:', error);
@@ -78,4 +78,3 @@ router.get('/', async (req, res) => {
 });
 
 module.exports = router;
-

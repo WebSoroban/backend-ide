@@ -9,10 +9,10 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d';
  */
 function generateToken(user) {
   const payload = {
-    userId: user._id.toString(),
+    userId: user.id,
     email: user.email,
     walletAddress: user.walletAddress,
-    plan: user.subscription.plan
+    plan: user.subscription?.plan || 'free'
   };
   
   return jwt.sign(payload, JWT_SECRET, {
