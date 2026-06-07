@@ -21,6 +21,10 @@ import usageRoutes from './routes/usage';
 import contractsRoutes from './routes/contracts';
 import walletRoutes from './routes/wallet';
 
+// Boot marker — if this prints, all module imports (incl. the Stellar CLI check
+// in deploymentService) resolved without hanging.
+console.log('[boot] modules loaded, initializing server...');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -170,8 +174,10 @@ app.use('/api/*', (req: Request, res: Response) => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+const PORT = Number(process.env.PORT) || 3001;
+// Bind explicitly on 0.0.0.0 so Railway's healthcheck can reach the container
+// over IPv4 (a bare listen can bind IPv6-only on some hosts).
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
   console.log(`CORS allowed origins: ${allowedOrigins.join(', ')}`);

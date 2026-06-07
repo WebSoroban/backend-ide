@@ -46,13 +46,14 @@ function getStellarEnv(secret: string | null = null): NodeJS.ProcessEnv {
   return env;
 }
 
-// Check if Stellar CLI is available
+// Check if Stellar CLI is available. Bounded by a timeout so a slow/hung CLI
+// can never block process startup (this runs at import time).
 let stellarAvailable = false;
 try {
-  execSync('stellar --version', { stdio: 'ignore' });
+  execSync('stellar --version', { stdio: 'ignore', timeout: 5000 });
   stellarAvailable = true;
 } catch (error) {
-  console.warn('Stellar CLI not available');
+  console.warn('Stellar CLI not available (or timed out)');
 }
 
 class DeploymentService {
