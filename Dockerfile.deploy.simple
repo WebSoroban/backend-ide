@@ -23,7 +23,7 @@ ENV PATH="/root/.cargo/bin:$PATH"
 RUN rustup target add wasm32v1-none
 
 # Install Stellar CLI using cargo with minimal dependencies
-RUN cargo install --locked stellar-cli --no-default-features
+RUN cargo install --locked stellar-cli@25.2.0 --no-default-features
 
 # Create symlink for backward compatibility (soroban -> stellar)
 RUN ln -s /root/.cargo/bin/stellar /usr/local/bin/soroban

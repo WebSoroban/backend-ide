@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
 RUN rustup target add wasm32v1-none
 
 # Install Stellar CLI using cargo (official method)
-RUN cargo install --locked stellar-cli
+RUN cargo install --locked stellar-cli@25.2.0
 
 # Create symlink for backward compatibility (soroban -> stellar)
 RUN ln -s /usr/local/cargo/bin/stellar /usr/local/cargo/bin/soroban
