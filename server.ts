@@ -1,0 +1,188 @@
+import 'dotenv/config';
+import express, { type Request, type Response, type NextFunction } from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import passport from 'passport';
+import prisma from './lib/prisma';
+import socketService from './services/socketService';
+
+import authRoutes from './routes/auth';
+import projectsRoutes from './routes/projects';
+import compileRoutes from './routes/compile';
+import deployRoutes from './routes/deploy';
+import templatesRoutes from './routes/templates';
+import jobsRoutes from './routes/jobs';
+import subscriptionsRoutes from './routes/subscriptions';
+import premiumGiftsRoutes from './routes/premium-gifts';
+import paymentsRoutes from './routes/payments';
+import usageRoutes from './routes/usage';
+import contractsRoutes from './routes/contracts';
+import walletRoutes from './routes/wallet';
+
+const app = express();
+const server = http.createServer(app);
+
+// Allowed frontend origins (hardcoded)
+const allowedOrigins = [
+  "https://web-soroban.vercel.app",
+  "https://websoroban.in",
+  "https://www.websoroban.in",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000"
+];
+
+// CORS validation function
+const corsOptions: cors.CorsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      console.log('[CORS] Request with no origin - allowing');
+      return callback(null, true);
+    }
+
+    console.log(`[CORS] Request from origin: ${origin}`);
+
+    // Normalize origin (remove trailing slash, www, etc.)
+    const normalizedOrigin = origin.replace(/\/$/, ''); // Remove trailing slash
+
+    // Check if origin is in allowed list (exact match or normalized)
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes(normalizedOrigin)) {
+      console.log(`[CORS] Origin allowed: ${origin}`);
+      return callback(null, true);
+    }
+    // In development, allow any localhost / 127.0.0.1 origin (different ports)
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        const u = new URL(origin);
+        if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+          console.log(`[CORS] Origin allowed (dev): ${origin}`);
+          return callback(null, true);
+        }
+      } catch (_) {}
+    }
+    console.log(`[CORS] Origin NOT allowed: ${origin}`);
+    console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
+    callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"],
+  exposedHeaders: ["Content-Type"]
+};
+
+// Socket.IO setup with CORS
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
+  }
+});
+
+// Make io available globally for workers
+global.io = io;
+
+// Initialize socket service
+socketService.init(io);
+
+// Request logging middleware (for debugging)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  console.log(`[Request] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
+  next();
+});
+
+// Middleware - CORS configuration
+app.use(cors(corsOptions));
+app.use(cookieParser());
+app.use(express.json());
+app.use(passport.initialize());
+
+// Health check endpoint
+app.get('/api/health', async (req: Request, res: Response) => {
+  let database = 'disconnected';
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    database = 'connected';
+  } catch (_) {
+    database = 'disconnected';
+  }
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    database
+  });
+});
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/projects', projectsRoutes);
+app.use('/api/compile', compileRoutes);
+app.use('/api/deploy', deployRoutes);
+app.use('/api/templates', templatesRoutes);
+app.use('/api/jobs', jobsRoutes);
+// Commented out invite system - replaced with premium gifting
+// app.use('/api/invites', invitesRoutes);
+app.use('/api/subscriptions', subscriptionsRoutes);
+app.use('/api/premium-gifts', premiumGiftsRoutes);
+app.use('/api/payments', paymentsRoutes);
+app.use('/api/usage', usageRoutes);
+app.use('/api/contracts', contractsRoutes);
+app.use('/api/wallet', walletRoutes);
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log(`[Socket.IO] Client connected: ${socket.id}`);
+
+  // Handle job subscription
+  socket.on('subscribe:job', (jobId: string) => {
+    console.log(`[Socket.IO] Client ${socket.id} subscribed to job: ${jobId}`);
+    socket.join(`job:${jobId}`);
+  });
+
+  // Handle job unsubscription
+  socket.on('unsubscribe:job', (jobId: string) => {
+    console.log(`[Socket.IO] Client ${socket.id} unsubscribed from job: ${jobId}`);
+    socket.leave(`job:${jobId}`);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[Socket.IO] Client disconnected: ${socket.id}`);
+  });
+});
+
+// Error handling middleware (must be after routes)
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('[Error]', err);
+  res.status(err.status || 500).json({
+    success: false,
+    error: err.message || 'Internal server error'
+  });
+});
+
+// 404 handler for API routes
+app.use('/api/*', (req: Request, res: Response) => {
+  console.log(`[404] Route not found: ${req.method} ${req.path}`);
+  res.status(404).json({
+    success: false,
+    error: `Route not found: ${req.method} ${req.path}`
+  });
+});
+
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Socket.IO server initialized`);
+  console.log(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
+  console.log(`Database: Neon Postgres (Prisma)`);
+  console.log(`Available routes:`);
+  console.log(`  - GET  /api/health`);
+  console.log(`  - GET  /api/wallet/me`);
+  console.log(`  - POST /api/wallet/ensure`);
+  console.log(`  - POST /api/wallet/fund`);
+
+  // Verify Socket.IO is working
+  console.log(`Socket.IO namespace: ${(io as any).name}`);
+  console.log(`Socket.IO engine: ${(io.engine as any)?.constructor?.name || 'unknown'}`);
+});
