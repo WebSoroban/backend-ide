@@ -15,6 +15,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
     "@stellar/stellar-base": "^13.1.0",
     "@stellar/stellar-sdk": "^13.3.0",
     "bcryptjs": "^2.4.3",
@@ -37,6 +38,7 @@
     "passport-github2": "^0.1.12",
     "passport-google-oauth20": "^2.0.0",
     "pdfkit": "^0.14.0",
+    "prisma": "^6.19.3",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1"
   },

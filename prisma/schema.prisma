@@ -1,0 +1,277 @@
+// WebSoroban backend data layer — Neon.tech (serverless Postgres) via Prisma.
+//
+// DATABASE_URL: pooled Neon connection string (?sslmode=require) used at runtime.
+// DIRECT_URL:   direct (non-pooled) Neon connection string used for migrations.
+//
+// Run: npx prisma migrate dev --name init   (creates tables)
+//      npx prisma generate                  (regenerates client)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// User
+// `subscription` and `usage` are kept as JSON blobs to preserve the exact
+// denormalized shape the API and frontend already consume. The relational
+// Subscription/Payment tables below hold the full history.
+// `walletAddress` is the user's EXTERNAL connect-wallet (auth) — distinct from
+// the server-managed deploy Wallet relation below.
+// ---------------------------------------------------------------------------
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  walletAddress      String?  @unique
+  authMethod         String   @default("gmail")
+  googleId           String?  @unique
+  githubId           String?  @unique
+  discordId          String?  @unique
+  passwordHash       String?
+  name               String   @default("")
+  picture            String?
+  subscription       Json     @default("{\"plan\":\"free\",\"status\":\"active\"}")
+  usage              Json     @default("{}")
+  isActive           Boolean  @default(true)
+  lastLogin          DateTime @default(now())
+  purchasedTemplates String[] @default([])
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  wallet            Wallet?
+  projects          Project[]
+  jobs              Job[]
+  deployments       Deployment[]
+  subscriptions     Subscription[]
+  payments          Payment[]
+  usageLogs         UsageLog[]
+  templatePurchases TemplatePurchase[]
+
+  @@index([authMethod])
+}
+
+// ---------------------------------------------------------------------------
+// Wallet — per-user Stellar testnet keypair, created on first login.
+// Secret key is AES-256-GCM encrypted at rest; NEVER stored or returned plain.
+// ---------------------------------------------------------------------------
+model Wallet {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  publicKey          String
+  secretKeyEncrypted String
+  funded             Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Project + File (embedded files array -> related File rows)
+// ---------------------------------------------------------------------------
+model Project {
+  id              String   @id @default(cuid())
+  name            String   @default("Untitled Project")
+  userId          String
+  contractAddress String?
+  lastDeployed    DateTime?
+  isLocal         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files       File[]
+  deployments Deployment[]
+
+  @@index([userId])
+  @@index([userId, updatedAt])
+}
+
+model File {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  type      String   @default("file")
+  content   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+// ---------------------------------------------------------------------------
+// Deployment — replaces Project.deploymentHistory embedded array.
+// Records the deploying user's public key and the resulting contract id.
+// ---------------------------------------------------------------------------
+model Deployment {
+  id                String   @id @default(cuid())
+  projectId         String?
+  userId            String?
+  contractAddress   String?
+  deployerPublicKey String?
+  network           String   @default("testnet")
+  status            String   @default("success")
+  logs              String[] @default([])
+  createdAt         DateTime @default(now())
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([contractAddress])
+}
+
+// ---------------------------------------------------------------------------
+// Job — compile/deploy queue tracking (mirrors BullMQ jobs)
+// ---------------------------------------------------------------------------
+model Job {
+  id        String   @id @default(cuid())
+  type      String // compile | deploy
+  status    String   @default("queued") // queued | active | completed | failed
+  userId    String
+  projectId String
+  bullJobId String   @unique
+  result    Json?
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Invite
+// ---------------------------------------------------------------------------
+model Invite {
+  id         String    @id @default(cuid())
+  email      String
+  inviteCode String    @unique
+  sent       Boolean   @default(false)
+  sentAt     DateTime?
+  used       Boolean   @default(false)
+  usedAt     DateTime?
+  usedBy     String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([email])
+  @@index([email, sent])
+  @@index([inviteCode, used])
+}
+
+// ---------------------------------------------------------------------------
+// Subscription (history of subscription records)
+// ---------------------------------------------------------------------------
+model Subscription {
+  id              String    @id @default(cuid())
+  userId          String
+  plan            String // free | plan2 | plan3
+  status          String    @default("active") // active | cancelled | expired
+  startDate       DateTime  @default(now())
+  endDate         DateTime?
+  paymentTxHash   String?
+  paymentNetwork  String? // testnet | mainnet
+  amount          Float     @default(0)
+  currency        String    @default("XLM")
+  autoRenew       Boolean   @default(false)
+  cancelledAt     DateTime?
+  cancelledReason String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([userId, status])
+  @@index([paymentTxHash])
+  @@index([endDate])
+}
+
+// ---------------------------------------------------------------------------
+// Payment
+// ---------------------------------------------------------------------------
+model Payment {
+  id             String    @id @default(cuid())
+  userId         String
+  subscriptionId String?
+  plan           String // plan2 | plan3
+  amount         Float
+  currency       String    @default("XLM")
+  txHash         String    @unique
+  network        String // testnet | mainnet
+  fromAddress    String
+  toAddress      String
+  status         String    @default("pending") // pending | confirmed | failed | refunded
+  confirmedAt    DateTime?
+  blockNumber    Int?
+  memo           String?
+  verified       Boolean   @default(false)
+  verifiedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// UsageLog
+// ---------------------------------------------------------------------------
+model UsageLog {
+  id              String   @id @default(cuid())
+  userId          String
+  action          String // compile | deploy | function_test
+  projectId       String?
+  contractAddress String?
+  functionName    String?
+  success         Boolean  @default(true)
+  error           String?
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, action, createdAt])
+  @@index([contractAddress])
+}
+
+// ---------------------------------------------------------------------------
+// TemplatePurchase
+// ---------------------------------------------------------------------------
+model TemplatePurchase {
+  id          String    @id @default(cuid())
+  userId      String
+  templateId  String
+  amount      Float
+  currency    String    @default("XLM")
+  txHash      String?
+  network     String    @default("testnet")
+  status      String    @default("pending") // pending | confirmed | failed | expired
+  memo        String    @unique
+  confirmedAt DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, templateId, status])
+  @@index([status, createdAt])
+}
