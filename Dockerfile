@@ -31,8 +31,10 @@ WORKDIR /app
 
 # Copy package files first for better caching
 COPY package*.json ./
+# Prisma schema is required by the postinstall `prisma generate`
+COPY prisma ./prisma
 
-# Install Node dependencies
+# Install Node dependencies (postinstall runs `prisma generate`)
 RUN npm cache clean --force \
     && npm install --production --no-optional \
     && npm cache clean --force

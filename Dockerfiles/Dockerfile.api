@@ -11,8 +11,10 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+# Prisma schema is required by the postinstall `prisma generate`
+COPY prisma ./prisma
 
-# Install dependencies
+# Install dependencies (postinstall runs `prisma generate`)
 # Using npm install instead of npm ci to handle lockfile sync issues
 # TODO: Update package-lock.json locally and switch back to npm ci
 RUN npm install --only=production --legacy-peer-deps

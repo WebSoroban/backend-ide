@@ -34,9 +34,9 @@ mkdir -p temp logs
 export NODE_ENV=production
 export PORT=3001
 
-# If MONGODB_URI is not set, use local MongoDB
-if [ -z "$MONGODB_URI" ]; then
-    echo "ℹ️  Using local MongoDB. Set MONGODB_URI environment variable for external database."
+# DATABASE_URL (Neon Postgres) must be set in .env for the app to start.
+if [ -z "$DATABASE_URL" ]; then
+    echo "ℹ️  DATABASE_URL not set in the environment; ensure it is provided via .env (Neon Postgres)."
 fi
 
 # Build and start services
@@ -46,7 +46,7 @@ docker-compose up --build -d
 if [ $? -eq 0 ]; then
     echo "✅ Services started successfully"
     echo "📊 Backend is running on http://localhost:3001"
-    echo "📊 MongoDB is running on localhost:27017"
+    echo "📊 Database: Neon Postgres (via DATABASE_URL)"
     echo ""
     echo "🔍 Check logs with: docker-compose logs -f"
     echo "🛑 Stop services with: docker-compose down"
