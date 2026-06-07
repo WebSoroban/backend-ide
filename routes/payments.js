@@ -28,10 +28,10 @@ router.post('/verify', authenticate, async (req, res) => {
     }
     
     const price = plan === 'plan2' ? 50 : 100;
-    const memo = user._id.toString();
-    
+    const memo = user.id;
+
     // Process payment
-    const result = await paymentService.processPayment(txHash, user._id, plan);
+    const result = await paymentService.processPayment(txHash, user.id, plan);
     
     if (result.success) {
       // Refresh user data to reflect the upgraded subscription
