@@ -51,13 +51,19 @@ class PaymentService {
       let transaction: any, operations: any;
 
       if (this.useServer && this.server) {
-        // Use Stellar SDK Server
-        transaction = await this.server.transactions().transaction(txHash).call();
-        operations = await this.server.operations().forTransaction(txHash).call();
+        // Use Stellar SDK Server — fetch the tx + its operations concurrently.
+        const [txData, opsData] = await Promise.all([
+          this.server.transactions().transaction(txHash).call(),
+          this.server.operations().forTransaction(txHash).call(),
+        ]);
+        transaction = txData;
+        operations = opsData;
       } else {
-        // Use direct Horizon API calls with built-in fetch (Node.js 18+)
-        // Node.js 18.20.8 has fetch built-in, use it directly
-        const txResponse = await fetch(`${this.horizonUrl}/transactions/${txHash}`);
+        // Direct Horizon API calls (Node 18+ built-in fetch) — run both round-trips concurrently.
+        const [txResponse, opsResponse] = await Promise.all([
+          fetch(`${this.horizonUrl}/transactions/${txHash}`),
+          fetch(`${this.horizonUrl}/transactions/${txHash}/operations`),
+        ]);
         if (!txResponse.ok) {
           return {
             success: false,
@@ -66,7 +72,6 @@ class PaymentService {
         }
         transaction = await txResponse.json();
 
-        const opsResponse = await fetch(`${this.horizonUrl}/transactions/${txHash}/operations`);
         if (!opsResponse.ok) {
           return {
             success: false,
@@ -319,36 +324,34 @@ class PaymentService {
         data: { subscriptionId: subscription.id }
       });
 
-      // Generate and send receipt
-      try {
-        const receiptData = {
-          userEmail: user.email,
-          userName: user.name || user.email!.split('@')[0],
-          planName: plan === 'plan2' ? 'Pro' : 'Premium',
-          planId: plan,
-          amount: price,
-          currency: 'XLM',
-          txHash: txHash,
-          network: NETWORK,
-          paymentDate: new Date(),
-          subscriptionStart: subscription.startDate,
-          subscriptionEnd: subscription.endDate
-        };
-
-        // Generate PDF receipt
-        const pdfPath = await receiptService.generateReceipt(receiptData);
-
-        // Send receipt via email
-        if (user.email && user.email !== `${user.walletAddress?.substring(0, 8)}@wallet.local`) {
-          await receiptService.sendReceiptEmail(user.email, pdfPath, receiptData);
-          console.log(`[PaymentService] Receipt sent to ${user.email}`);
-        } else {
-          console.warn(`[PaymentService] Cannot send receipt - invalid email: ${user.email}`);
+      // Generate + email the receipt in the background. PDF rendering and SMTP
+      // are slow and must never hold up the payment-confirmed response.
+      const receiptData = {
+        userEmail: user.email,
+        userName: user.name || user.email!.split('@')[0],
+        planName: plan === 'plan2' ? 'Pro' : 'Premium',
+        planId: plan,
+        amount: price,
+        currency: 'XLM',
+        txHash: txHash,
+        network: NETWORK,
+        paymentDate: new Date(),
+        subscriptionStart: subscription.startDate,
+        subscriptionEnd: subscription.endDate
+      };
+      void (async () => {
+        try {
+          const pdfPath = await receiptService.generateReceipt(receiptData);
+          if (user.email && user.email !== `${user.walletAddress?.substring(0, 8)}@wallet.local`) {
+            await receiptService.sendReceiptEmail(user.email, pdfPath, receiptData);
+            console.log(`[PaymentService] Receipt sent to ${user.email}`);
+          } else {
+            console.warn(`[PaymentService] Cannot send receipt - invalid email: ${user.email}`);
+          }
+        } catch (receiptError) {
+          console.error('[PaymentService] Failed to generate/send receipt:', receiptError);
         }
-      } catch (receiptError) {
-        // Don't fail payment if receipt generation fails
-        console.error('[PaymentService] Failed to generate/send receipt:', receiptError);
-      }
+      })();
 
       return {
         success: true,
@@ -408,24 +411,27 @@ class PaymentService {
         });
       }
 
-      // Send purchase confirmation email (non-blocking)
-      try {
-        const template = getTemplateById(purchase.templateId);
-        const templateName = template ? template.name : purchase.templateId;
-        const userEmail = user?.email;
-        if (userEmail && userEmail !== `${user?.walletAddress?.substring(0, 8)}@wallet.local`) {
-          await emailService.sendTemplatePurchaseNotification(
-            userEmail,
-            templateName,
-            purchase.amount,
-            purchase.currency || 'XLM',
-            txHash,
-            { userName: user?.name || user?.email?.split('@')[0] }
-          );
+      // Send purchase confirmation email in the background — SMTP latency must
+      // not delay unlocking the template for the user.
+      void (async () => {
+        try {
+          const template = getTemplateById(purchase.templateId);
+          const templateName = template ? template.name : purchase.templateId;
+          const userEmail = user?.email;
+          if (userEmail && userEmail !== `${user?.walletAddress?.substring(0, 8)}@wallet.local`) {
+            await emailService.sendTemplatePurchaseNotification(
+              userEmail,
+              templateName,
+              purchase.amount,
+              purchase.currency || 'XLM',
+              txHash,
+              { userName: user?.name || user?.email?.split('@')[0] }
+            );
+          }
+        } catch (emailErr) {
+          console.error('[PaymentService] Template purchase email failed:', emailErr);
         }
-      } catch (emailErr) {
-        console.error('[PaymentService] Template purchase email failed:', emailErr);
-      }
+      })();
 
       return {
         success: true,

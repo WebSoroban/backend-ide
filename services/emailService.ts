@@ -29,14 +29,35 @@ class EmailService {
    * Initialize nodemailer transporter
    */
   initialize() {
+    const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+    const port = parseInt(process.env.SMTP_PORT || '587', 10);
+    // Port 465 is implicit TLS; 587/25 use STARTTLS. Honour SMTP_SECURE when
+    // set, otherwise derive it from the port so a 465 host can't be opened in
+    // plaintext mode (which silently hangs).
+    const secure = process.env.SMTP_SECURE
+      ? process.env.SMTP_SECURE === 'true'
+      : port === 465;
+
     const emailConfig = {
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587', 10),
-      secure: process.env.SMTP_SECURE === 'true', // true for 465, false for other ports
+      host,
+      port,
+      secure,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASSWORD
-      }
+      },
+      // Railway/Render/Fly outbound IPv6 to Gmail's SMTP is frequently
+      // unrouteable; Node tries the AAAA record first and hangs until timeout
+      // (the ETIMEDOUT on CONN seen only in production). Force IPv4.
+      family: 4,
+      // Fail fast instead of hanging on nodemailer's ~2-minute defaults.
+      connectionTimeout: 10_000, // TCP connect
+      greetingTimeout: 10_000,   // SMTP greeting
+      socketTimeout: 20_000,     // socket inactivity
+      // Reuse a small connection pool across the background email sends.
+      pool: true,
+      maxConnections: 2,
+      maxMessages: 50
     };
 
     // Only create transporter if credentials are provided

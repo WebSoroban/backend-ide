@@ -39,3 +39,5 @@ else
 fi
 
 echo "🎉 Setup complete! You can now start the backend with: npm run dev" 
+
+
