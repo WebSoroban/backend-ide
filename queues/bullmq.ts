@@ -1,21 +1,9 @@
 import { Queue, Worker, QueueEvents, type Processor, type WorkerOptions } from 'bullmq';
-import Redis from 'ioredis';
+import { createRedisClient, redisTarget } from '../lib/redis';
 
-// Redis connection configuration
-// Default to 'localhost' for local development, 'redis' for Docker
-const redisHost = process.env.REDIS_HOST || (process.env.NODE_ENV === 'production' ? 'redis' : 'localhost');
-const redisPort = parseInt(process.env.REDIS_PORT || '6379', 10);
-const redisPassword = process.env.REDIS_PASSWORD || undefined;
-const redisDb = parseInt(process.env.REDIS_DB || '0', 10);
-
-// Create Redis connection with retry logic
-const connection = new Redis({
-  host: redisHost,
-  port: redisPort,
-  password: redisPassword,
-  db: redisDb,
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
+// Shared Redis connection (supports REDIS_URL for managed hosts like Railway,
+// with a discrete REDIS_HOST/PORT fallback for local + docker-compose).
+const connection = createRedisClient({
   retryStrategy: (times: number) => {
     const delay = Math.min(times * 50, 2000);
     console.log(`[Redis] Retrying connection (attempt ${times})...`);
@@ -32,7 +20,7 @@ const connection = new Redis({
 
 // Handle Redis connection events
 connection.on('connect', () => {
-  console.log(`[Redis] Connected to ${redisHost}:${redisPort}`);
+  console.log(`[Redis] Connected to ${redisTarget()}`);
 });
 
 connection.on('error', (err: Error) => {

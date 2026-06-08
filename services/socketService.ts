@@ -1,6 +1,7 @@
 import Redis from 'ioredis';
 import type { Server as SocketIOServer } from 'socket.io';
 import type { LogEntry } from './compilationService';
+import { createRedisClient, redisTarget } from '../lib/redis';
 
 /**
  * Socket.IO service for emitting real-time log updates
@@ -22,36 +23,24 @@ class SocketService {
   init(ioInstance: SocketIOServer | null) {
     this.io = ioInstance;
 
-    // Set up Redis pub/sub for cross-process communication
-    const redisHost = process.env.REDIS_HOST || (process.env.NODE_ENV === 'production' ? 'redis' : 'localhost');
-    const redisPort = parseInt(process.env.REDIS_PORT || '6379', 10);
-    const redisPassword = process.env.REDIS_PASSWORD || undefined;
-    const redisDb = parseInt(process.env.REDIS_DB || '0', 10);
+    // Redis pub/sub for cross-process communication. Uses the same shared
+    // connection config as BullMQ (REDIS_URL on managed hosts; host/port locally)
+    // so the workers and the API always talk to the SAME Redis.
 
     // Set up Redis publisher (always needed for workers and main server)
     if (!this.redisPublisher) {
-      this.redisPublisher = new Redis({
-        host: redisHost,
-        port: redisPort,
-        password: redisPassword,
-        db: redisDb
-      });
+      this.redisPublisher = createRedisClient();
 
       this.redisPublisher.on('error', (err: Error) => {
         console.error('[SocketService] Redis publisher error:', err);
       });
 
-      console.log('[SocketService] Redis publisher initialized');
+      console.log(`[SocketService] Redis publisher initialized -> ${redisTarget()}`);
     }
 
     // Only set up subscriber in the main server (not in workers)
     if (ioInstance && !this.redisSubscriber) {
-      this.redisSubscriber = new Redis({
-        host: redisHost,
-        port: redisPort,
-        password: redisPassword,
-        db: redisDb
-      });
+      this.redisSubscriber = createRedisClient();
 
       // Subscribe to job log channels
       this.redisSubscriber.psubscribe('job:log:*');
