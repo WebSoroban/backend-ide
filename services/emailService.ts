@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { readFile } from 'node:fs/promises';
 import nodemailer, { type Transporter } from 'nodemailer';
 
 interface SendResult {
@@ -12,6 +13,23 @@ interface EmailOptions {
   appName?: string;
   subject?: string;
   userName?: string | null;
+}
+
+interface MailAttachment {
+  filename: string;
+  /** Raw content (Buffer or string). Provide this or `path`. */
+  content?: Buffer | string;
+  /** Path to a file on disk to attach (read + base64-encoded for the HTTP API). */
+  path?: string;
+  contentType?: string;
+}
+
+interface DeliverOptions {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  attachments?: MailAttachment[];
 }
 
 /**
@@ -29,6 +47,22 @@ class EmailService {
    * Initialize nodemailer transporter
    */
   initialize() {
+    // EMAIL SENDING IS PAUSED (see deliver()). Don't open any SMTP connection —
+    // this avoids the boot-time connection-verify timeouts. Re-enable by
+    // removing this early return along with the switch in deliver().
+    this.transporter = null;
+    return;
+
+    /* eslint-disable no-unreachable -- kept for when email is re-enabled
+    // When the Resend HTTP API is configured we send over HTTPS (port 443) and
+    // never touch SMTP — which is blocked outbound on Railway. Skip the SMTP
+    // transporter entirely so its connection-verify doesn't spam ETIMEDOUT.
+    if (process.env.RESEND_API_KEY) {
+      this.transporter = null;
+      console.log('[EmailService] Resend HTTP API configured — using it for delivery (SMTP disabled).');
+      return;
+    }
+
     const host = process.env.SMTP_HOST || 'smtp.gmail.com';
     const port = parseInt(process.env.SMTP_PORT || '587', 10);
     // Port 465 is implicit TLS; 587/25 use STARTTLS. Honour SMTP_SECURE when
@@ -74,6 +108,116 @@ class EmailService {
       });
     } else {
       console.warn('[EmailService] SMTP credentials not configured. Email sending disabled.');
+    }
+    */
+  }
+
+  /**
+   * Single delivery entrypoint for every email. Routes over the Resend HTTPS
+   * API when configured (the only path that works on Railway, where SMTP ports
+   * are blocked), and falls back to SMTP for local development.
+   */
+  async deliver({ to, subject, html, text, attachments }: DeliverOptions): Promise<SendResult> {
+    // ───────────────────────────────────────────────────────────────────────
+    // EMAIL SENDING IS PAUSED.
+    // Every outgoing email (invite codes, template-purchase, premium gift,
+    // receipts) routes through deliver(), so this one switch disables all of
+    // them. To re-enable, delete this block — the implementation below is intact.
+    // ───────────────────────────────────────────────────────────────────────
+    console.log(`[EmailService] Email paused — skipped "${subject}" to ${to}`);
+    return { success: false, error: 'Email sending is disabled' };
+    /* eslint-disable no-unreachable -- implementation kept for when email is re-enabled
+    const appName = 'WebSoroban IDE';
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
+    const fromName = process.env.SMTP_FROM_NAME || appName;
+    if (!fromEmail) {
+      const errorMsg = 'SMTP_FROM or SMTP_USER environment variable is required';
+      console.error(`[EmailService] ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+    const from = `"${fromName}" <${fromEmail}>`;
+
+    // Prefer the HTTPS API — it works where outbound SMTP is blocked.
+    if (process.env.RESEND_API_KEY) {
+      return this.sendViaResend(from, { to, subject, html, text, attachments });
+    }
+
+    // SMTP fallback (local dev / hosts that allow outbound SMTP).
+    if (!this.transporter) {
+      this.initialize();
+      if (!this.transporter) {
+        const missing: string[] = [];
+        if (!process.env.SMTP_USER) missing.push('SMTP_USER');
+        if (!process.env.SMTP_PASSWORD) missing.push('SMTP_PASSWORD');
+        const errorMsg = missing.length
+          ? `Email not configured. Missing: ${missing.join(', ')} (or set RESEND_API_KEY).`
+          : 'Email not configured. Set RESEND_API_KEY or SMTP credentials.';
+        console.warn(`[EmailService] ${errorMsg}`);
+        return { success: false, error: errorMsg };
+      }
+    }
+
+    try {
+      const info = await this.transporter.sendMail({ from, to, subject, html, text, attachments });
+      return { success: true, messageId: info.messageId };
+    } catch (error: any) {
+      let errorMessage = error.message;
+      if (error.code === 'EAUTH') errorMessage = 'SMTP authentication failed. Check SMTP_USER and SMTP_PASSWORD.';
+      else if (error.code === 'ECONNECTION') errorMessage = `Cannot connect to SMTP server (${process.env.SMTP_HOST || 'smtp.gmail.com'}:${process.env.SMTP_PORT || '587'}).`;
+      else if (error.code === 'ETIMEDOUT') errorMessage = 'SMTP connection timed out (SMTP ports are blocked on Railway — set RESEND_API_KEY).';
+      console.error(`[EmailService] SMTP send failed to ${to}:`, errorMessage);
+      return { success: false, error: errorMessage, errorCode: error.code };
+    }
+    */
+  }
+
+  /**
+   * Send a message through the Resend HTTP API over HTTPS.
+   * @see https://resend.com/docs/api-reference/emails/send-email
+   */
+  private async sendViaResend(from: string, { to, subject, html, text, attachments }: DeliverOptions): Promise<SendResult> {
+    try {
+      let resendAttachments: Array<{ filename: string; content: string }> | undefined;
+      if (attachments?.length) {
+        resendAttachments = await Promise.all(
+          attachments.map(async (a) => {
+            const buf = a.content
+              ? Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content)
+              : a.path ? await readFile(a.path) : Buffer.alloc(0);
+            return { filename: a.filename, content: buf.toString('base64') };
+          }),
+        );
+      }
+
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from,
+          to: [to],
+          subject,
+          html,
+          text,
+          ...(resendAttachments ? { attachments: resendAttachments } : {}),
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        const errorMsg = `Resend API error (${response.status}): ${body || response.statusText}`;
+        console.error(`[EmailService] ${errorMsg}`);
+        return { success: false, error: errorMsg, errorCode: String(response.status) };
+      }
+
+      const data: any = await response.json().catch(() => ({}));
+      console.log(`[EmailService] Email sent via Resend to ${to}: ${data?.id || ''}`);
+      return { success: true, messageId: data?.id };
+    } catch (error: any) {
+      console.error(`[EmailService] Resend send failed to ${to}:`, error?.message || error);
+      return { success: false, error: error?.message || 'Resend send failed', errorCode: error?.code };
     }
   }
 
@@ -166,77 +310,15 @@ If you didn't request this invite, you can safely ignore this email.
    * Send invite code email
    */
   async sendInviteCode(to: string, inviteCode: string, options: EmailOptions = {}): Promise<SendResult> {
-    if (!this.transporter) {
-      console.log('[EmailService] Transporter not initialized, attempting to initialize...');
-      this.initialize();
-
-      // Check again after initialization
-      if (!this.transporter) {
-        const missingConfig: string[] = [];
-        if (!process.env.SMTP_USER) missingConfig.push('SMTP_USER');
-        if (!process.env.SMTP_PASSWORD) missingConfig.push('SMTP_PASSWORD');
-
-        const errorMsg = missingConfig.length > 0
-          ? `Email service not configured. Missing: ${missingConfig.join(', ')}`
-          : 'Email service not configured. Please check SMTP settings.';
-
-        console.warn(`[EmailService] ${errorMsg}`);
-        console.warn(`[EmailService] SMTP_USER: ${process.env.SMTP_USER ? 'SET' : 'NOT SET'}`);
-        console.warn(`[EmailService] SMTP_PASSWORD: ${process.env.SMTP_PASSWORD ? 'SET' : 'NOT SET'}`);
-        return {
-          success: false,
-          error: errorMsg
-        };
-      }
-    }
-
     const appName = options.appName || 'WebSoroban IDE';
-    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
-    const fromName = process.env.SMTP_FROM_NAME || appName;
-
-    if (!fromEmail) {
-      const errorMsg = 'SMTP_FROM or SMTP_USER environment variable is required';
-      console.error(`[EmailService] ${errorMsg}`);
-      return {
-        success: false,
-        error: errorMsg
-      };
-    }
-
-    const mailOptions = {
-      from: `"${fromName}" <${fromEmail}>`,
-      to: to,
+    const result = await this.deliver({
+      to,
       subject: options.subject || `Your Invite Code for ${appName}`,
       text: this.generateInviteEmailText(inviteCode, appName),
-      html: this.generateInviteEmailTemplate(inviteCode, appName)
-    };
-
-    try {
-      const info = await this.transporter.sendMail(mailOptions);
-      console.log(`[EmailService] Invite code email sent to ${to}:`, info.messageId);
-      return {
-        success: true,
-        messageId: info.messageId
-      };
-    } catch (error: any) {
-      console.error(`[EmailService] Failed to send email to ${to}:`, error);
-
-      // Provide more specific error messages
-      let errorMessage = error.message;
-      if (error.code === 'EAUTH') {
-        errorMessage = 'SMTP authentication failed. Please check your SMTP_USER and SMTP_PASSWORD.';
-      } else if (error.code === 'ECONNECTION') {
-        errorMessage = `Cannot connect to SMTP server (${process.env.SMTP_HOST || 'smtp.gmail.com'}:${process.env.SMTP_PORT || '587'}). Please check SMTP_HOST and SMTP_PORT.`;
-      } else if (error.code === 'ETIMEDOUT') {
-        errorMessage = 'SMTP connection timed out. Please check your network connection and SMTP settings.';
-      }
-
-      return {
-        success: false,
-        error: errorMessage,
-        errorCode: error.code
-      };
-    }
+      html: this.generateInviteEmailTemplate(inviteCode, appName),
+    });
+    if (result.success) console.log(`[EmailService] Invite code email sent to ${to}: ${result.messageId || ''}`);
+    return result;
   }
 
   /**
@@ -508,39 +590,16 @@ Create a new project and choose "${templateName}" from the template list to get 
     txHash: string,
     options: EmailOptions = {}
   ): Promise<SendResult> {
-    if (!this.transporter) {
-      this.initialize();
-      if (!this.transporter) {
-        console.warn('[EmailService] SMTP not configured, skipping template purchase email');
-        return { success: false, error: 'Email not configured' };
-      }
-    }
-
     const appName = options.appName || 'WebSoroban IDE';
-    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
-    const fromName = process.env.SMTP_FROM_NAME || appName;
-    if (!fromEmail) {
-      console.warn('[EmailService] SMTP_FROM/SMTP_USER not set, skipping template purchase email');
-      return { success: false, error: 'From email not set' };
-    }
-
     const userName = options.userName || null;
-    const mailOptions = {
-      from: `"${fromName}" <${fromEmail}>`,
-      to: to,
+    const result = await this.deliver({
+      to,
       subject: options.subject || `✓ Template purchased: ${templateName} - ${appName}`,
       text: this.generateTemplatePurchaseEmailText(userName, templateName, amount, currency, txHash, appName),
-      html: this.generateTemplatePurchaseEmailTemplate(userName, templateName, amount, currency, txHash, appName)
-    };
-
-    try {
-      const info = await this.transporter.sendMail(mailOptions);
-      console.log(`[EmailService] Template purchase confirmation sent to ${to}:`, info.messageId);
-      return { success: true, messageId: info.messageId };
-    } catch (error: any) {
-      console.error('[EmailService] Failed to send template purchase email:', error);
-      return { success: false, error: error.message };
-    }
+      html: this.generateTemplatePurchaseEmailTemplate(userName, templateName, amount, currency, txHash, appName),
+    });
+    if (result.success) console.log(`[EmailService] Template purchase confirmation sent to ${to}: ${result.messageId || ''}`);
+    return result;
   }
 
   /**
@@ -553,73 +612,15 @@ Create a new project and choose "${templateName}" from the template list to get 
     endDate: Date | string | null,
     options: EmailOptions = {}
   ): Promise<SendResult> {
-    if (!this.transporter) {
-      console.log('[EmailService] Transporter not initialized, attempting to initialize...');
-      this.initialize();
-
-      if (!this.transporter) {
-        const missingConfig: string[] = [];
-        if (!process.env.SMTP_USER) missingConfig.push('SMTP_USER');
-        if (!process.env.SMTP_PASSWORD) missingConfig.push('SMTP_PASSWORD');
-
-        const errorMsg = missingConfig.length > 0
-          ? `Email service not configured. Missing: ${missingConfig.join(', ')}`
-          : 'Email service not configured. Please check SMTP settings.';
-
-        console.warn(`[EmailService] ${errorMsg}`);
-        return {
-          success: false,
-          error: errorMsg
-        };
-      }
-    }
-
     const appName = options.appName || 'WebSoroban IDE';
-    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
-    const fromName = process.env.SMTP_FROM_NAME || appName;
-
-    if (!fromEmail) {
-      const errorMsg = 'SMTP_FROM or SMTP_USER environment variable is required';
-      console.error(`[EmailService] ${errorMsg}`);
-      return {
-        success: false,
-        error: errorMsg
-      };
-    }
-
-    const mailOptions = {
-      from: `"${fromName}" <${fromEmail}>`,
-      to: to,
+    const result = await this.deliver({
+      to,
       subject: options.subject || `🎁 Premium Subscription Gifted - ${appName}`,
       text: this.generatePremiumGiftEmailText(to, durationDays, isNewUser, endDate, appName),
-      html: this.generatePremiumGiftEmailTemplate(to, durationDays, isNewUser, endDate, appName)
-    };
-
-    try {
-      const info = await this.transporter.sendMail(mailOptions);
-      console.log(`[EmailService] Premium gift notification sent to ${to}:`, info.messageId);
-      return {
-        success: true,
-        messageId: info.messageId
-      };
-    } catch (error: any) {
-      console.error(`[EmailService] Failed to send premium gift email to ${to}:`, error);
-
-      let errorMessage = error.message;
-      if (error.code === 'EAUTH') {
-        errorMessage = 'SMTP authentication failed. Please check your SMTP_USER and SMTP_PASSWORD.';
-      } else if (error.code === 'ECONNECTION') {
-        errorMessage = `Cannot connect to SMTP server (${process.env.SMTP_HOST || 'smtp.gmail.com'}:${process.env.SMTP_PORT || '587'}). Please check SMTP_HOST and SMTP_PORT.`;
-      } else if (error.code === 'ETIMEDOUT') {
-        errorMessage = 'SMTP connection timed out. Please check your network connection and SMTP settings.';
-      }
-
-      return {
-        success: false,
-        error: errorMessage,
-        errorCode: error.code
-      };
-    }
+      html: this.generatePremiumGiftEmailTemplate(to, durationDays, isNewUser, endDate, appName),
+    });
+    if (result.success) console.log(`[EmailService] Premium gift notification sent to ${to}: ${result.messageId || ''}`);
+    return result;
   }
 }
 

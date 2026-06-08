@@ -239,52 +239,30 @@ class ReceiptService {
    * Send receipt via email
    */
   async sendReceiptEmail(to: string, pdfPath: string, receiptData: ReceiptData): Promise<SendResult> {
-    if (!emailService.transporter) {
-      emailService.initialize();
-      if (!emailService.transporter) {
-        return {
-          success: false,
-          error: 'Email service not configured'
-        };
-      }
-    }
+    const { planName, txHash } = receiptData;
 
-    const { planName, amount, currency, txHash, paymentDate, subscriptionEnd } = receiptData;
-    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
-    const fromName = process.env.SMTP_FROM_NAME || 'WebSoroban IDE';
-
-    const mailOptions = {
-      from: `"${fromName}" <${fromEmail}>`,
-      to: to,
+    // Route through emailService.deliver — it picks Resend (HTTPS) in production
+    // and SMTP locally, and base64-encodes the PDF for the HTTP API.
+    const result = await emailService.deliver({
+      to,
       subject: `Payment Receipt - ${planName} Subscription - WebSoroban IDE`,
       html: this.generateReceiptEmailTemplate(receiptData),
       text: this.generateReceiptEmailText(receiptData),
       attachments: [
         {
           filename: `receipt-${txHash.substring(0, 8)}.pdf`,
-          path: pdfPath
-        }
-      ]
-    };
+          path: pdfPath,
+          contentType: 'application/pdf',
+        },
+      ],
+    });
 
-    try {
-      const info = await emailService.transporter.sendMail(mailOptions);
-      console.log(`[ReceiptService] Receipt email sent to ${to}:`, info.messageId);
-
-      // Clean up PDF file after sending (optional - you might want to keep it)
-      // fs.unlinkSync(pdfPath);
-
-      return {
-        success: true,
-        messageId: info.messageId
-      };
-    } catch (error: any) {
-      console.error(`[ReceiptService] Failed to send receipt email to ${to}:`, error);
-      return {
-        success: false,
-        error: error.message
-      };
+    if (result.success) {
+      console.log(`[ReceiptService] Receipt email sent to ${to}: ${result.messageId || ''}`);
+    } else {
+      console.error(`[ReceiptService] Failed to send receipt email to ${to}:`, result.error);
     }
+    return result;
   }
 
   /**
