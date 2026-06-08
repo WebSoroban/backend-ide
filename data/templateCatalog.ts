@@ -169,6 +169,139 @@ export const TEMPLATE_CATALOG: Template[] = [
       ],
       readMore: 'For NFT or asset auctions on Stellar.'
     }
+  },
+  {
+    id: 'data-store',
+    name: 'Key-Value Store',
+    description: 'A simple persistent key-value store keyed by Symbol.',
+    category: 'Basic',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 0,
+    documentation: {
+      summary: 'Store, read, check, and remove i128 values by Symbol key.',
+      usage: 'Call put(key, value) to write; get(key) to read; has(key) to check; remove(key) to delete.',
+      functions: [
+        { name: 'put', params: ['env: Env', 'key: Symbol', 'value: i128'], returns: 'void', description: 'Stores a value under the given key.' },
+        { name: 'get', params: ['env: Env', 'key: Symbol'], returns: 'i128', description: 'Returns the value for a key (0 if unset).' },
+        { name: 'has', params: ['env: Env', 'key: Symbol'], returns: 'bool', description: 'Returns whether a key exists.' },
+        { name: 'remove', params: ['env: Env', 'key: Symbol'], returns: 'void', description: 'Removes a key.' }
+      ],
+      readMore: 'A minimal building block for on-chain configuration and state.'
+    }
+  },
+  {
+    id: 'name-registry',
+    name: 'Name Registry',
+    description: 'Register and resolve human-readable names to addresses.',
+    category: 'Utility',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 10,
+    documentation: {
+      summary: 'A simple name service mapping a Symbol name to an owner Address.',
+      usage: 'Register a name (must be unique), then resolve it to its owner address.',
+      functions: [
+        { name: 'register', params: ['env: Env', 'name: Symbol', 'owner: Address'], returns: 'void', description: 'Registers a name to an owner (fails if taken).' },
+        { name: 'resolve', params: ['env: Env', 'name: Symbol'], returns: 'Address', description: 'Returns the owner address for a name.' },
+        { name: 'is_registered', params: ['env: Env', 'name: Symbol'], returns: 'bool', description: 'Returns whether a name is registered.' }
+      ],
+      readMore: 'A foundation for naming systems and on-chain identity.'
+    }
+  },
+  {
+    id: 'tip-jar',
+    name: 'Tip Jar',
+    description: 'Accept tips and track totals per contributor.',
+    category: 'Marketplace',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 10,
+    documentation: {
+      summary: 'Record tips per sender and a running grand total.',
+      usage: 'Call tip(from, amount); read a sender total with tips_from; read the grand total with total_tips.',
+      functions: [
+        { name: 'tip', params: ['env: Env', 'from: Address', 'amount: i128'], returns: 'i128', description: 'Records a tip; returns the new grand total.' },
+        { name: 'tips_from', params: ['env: Env', 'addr: Address'], returns: 'i128', description: 'Returns total tips from an address.' },
+        { name: 'total_tips', params: ['env: Env'], returns: 'i128', description: 'Returns the grand total of all tips.' }
+      ],
+      readMore: 'A simple pattern for donations and creator support.'
+    }
+  },
+  {
+    id: 'pausable',
+    name: 'Pausable Contract',
+    description: 'An admin-controlled pause switch guarding contract actions.',
+    category: 'Security',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 15,
+    documentation: {
+      summary: 'Admin can pause/unpause; guarded actions revert while paused.',
+      usage: 'Initialize with an admin; admin pauses/unpauses; do_action runs only when not paused.',
+      functions: [
+        { name: 'init', params: ['env: Env', 'admin: Address'], returns: 'void', description: 'Sets the admin and starts unpaused.' },
+        { name: 'pause', params: ['env: Env'], returns: 'void', description: 'Pauses the contract (admin only).' },
+        { name: 'unpause', params: ['env: Env'], returns: 'void', description: 'Unpauses the contract (admin only).' },
+        { name: 'is_paused', params: ['env: Env'], returns: 'bool', description: 'Returns the paused state.' },
+        { name: 'do_action', params: ['env: Env'], returns: 'u32', description: 'Performs a guarded action; reverts if paused.' }
+      ],
+      readMore: 'The circuit-breaker pattern for safe upgrades and incident response.'
+    }
+  },
+  {
+    id: 'whitelist',
+    name: 'Whitelist / Access List',
+    description: 'An admin-managed allowlist of addresses.',
+    category: 'Security',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 15,
+    documentation: {
+      summary: 'Admin adds/removes addresses; anyone can check membership.',
+      usage: 'Initialize with an admin; admin adds/removes accounts; check with is_listed.',
+      functions: [
+        { name: 'init', params: ['env: Env', 'admin: Address'], returns: 'void', description: 'Sets the admin.' },
+        { name: 'add', params: ['env: Env', 'account: Address'], returns: 'void', description: 'Adds an address to the allowlist (admin only).' },
+        { name: 'remove', params: ['env: Env', 'account: Address'], returns: 'void', description: 'Removes an address (admin only).' },
+        { name: 'is_listed', params: ['env: Env', 'account: Address'], returns: 'bool', description: 'Returns whether an address is allowlisted.' }
+      ],
+      readMore: 'Gate sensitive functions to approved addresses.'
+    }
+  },
+  {
+    id: 'crowdfund',
+    name: 'Crowdfunding Contract',
+    description: 'Track contributions toward a funding goal.',
+    category: 'DeFi',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 20,
+    documentation: {
+      summary: 'Set a goal, accept contributions, and report progress.',
+      usage: 'Initialize with a goal; contributors call contribute; query total/goal/reached.',
+      functions: [
+        { name: 'init', params: ['env: Env', 'goal: i128'], returns: 'void', description: 'Sets the funding goal and zeroes the total.' },
+        { name: 'contribute', params: ['env: Env', 'from: Address', 'amount: i128'], returns: 'i128', description: 'Adds a contribution; returns the new total.' },
+        { name: 'total', params: ['env: Env'], returns: 'i128', description: 'Returns the amount raised so far.' },
+        { name: 'goal', params: ['env: Env'], returns: 'i128', description: 'Returns the funding goal.' },
+        { name: 'reached', params: ['env: Env'], returns: 'bool', description: 'Returns whether the goal has been reached.' }
+      ],
+      readMore: 'A starting point for fundraising and presale flows.'
+    }
+  },
+  {
+    id: 'timelock',
+    name: 'Timelock Vault',
+    description: 'Lock a value until a future ledger timestamp.',
+    category: 'DeFi',
+    files: ['lib.rs', 'Cargo.toml'],
+    price: 20,
+    documentation: {
+      summary: 'Lock an amount with an unlock time; claim only after it passes.',
+      usage: 'Call lock(from, amount, unlock_time); after the time, the beneficiary calls claim.',
+      functions: [
+        { name: 'lock', params: ['env: Env', 'from: Address', 'amount: i128', 'unlock_time: u64'], returns: 'void', description: 'Locks an amount until unlock_time.' },
+        { name: 'claim', params: ['env: Env', 'to: Address'], returns: 'i128', description: 'Claims the amount once unlocked; returns it.' },
+        { name: 'unlock_at', params: ['env: Env'], returns: 'u64', description: 'Returns the unlock timestamp.' },
+        { name: 'locked_amount', params: ['env: Env'], returns: 'i128', description: 'Returns the currently locked amount.' }
+      ],
+      readMore: 'For vesting, escrowed releases, and time-gated payouts.'
+    }
   }
 ];
 

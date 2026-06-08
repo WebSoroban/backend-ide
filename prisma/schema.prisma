@@ -51,6 +51,8 @@ model User {
   payments          Payment[]
   usageLogs         UsageLog[]
   templatePurchases TemplatePurchase[]
+  invocations       Invocation[]
+  functionTests     FunctionTest[]
 
   @@index([authMethod])
 }
@@ -81,6 +83,12 @@ model Project {
   contractAddress String?
   lastDeployed    DateTime?
   isLocal         Boolean  @default(false)
+  // Parsed contract interface ({ entries, functions }) extracted from the
+  // compiled WASM's `contractspecv0` section. Drives the type-aware invoke form.
+  spec            Json?
+  // SHA-256 of the last compiled/deployed WASM — used for deploy idempotency
+  // and build caching.
+  wasmHash        String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -118,6 +126,8 @@ model Deployment {
   deployerPublicKey String?
   network           String   @default("testnet")
   status            String   @default("success")
+  wasmHash          String?
+  spec              Json?
   logs              String[] @default([])
   createdAt         DateTime @default(now())
 
@@ -127,6 +137,52 @@ model Deployment {
   @@index([projectId])
   @@index([userId])
   @@index([contractAddress])
+}
+
+// ---------------------------------------------------------------------------
+// Invocation — one record per contract function call (read simulate or write).
+// returnValue is the decoded native result; secret keys are NEVER stored here.
+// ---------------------------------------------------------------------------
+model Invocation {
+  id           String   @id @default(cuid())
+  contractId   String
+  userId       String?
+  projectId    String?
+  functionName String
+  args         Json     @default("{}")
+  status       String   @default("pending") // simulated | submitted | success | failed
+  readOnly     Boolean  @default(false)
+  txHash       String?
+  returnValue  Json?
+  resourceFee  String?
+  error        String?
+  createdAt    DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([contractId, createdAt])
+  @@index([userId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// FunctionTest — a saved, named invocation case per function with an expected
+// return assertion. "Run tests" executes each via the simulate path.
+// ---------------------------------------------------------------------------
+model FunctionTest {
+  id           String   @id @default(cuid())
+  contractId   String
+  userId       String
+  functionName String
+  name         String
+  args         Json     @default("{}")
+  // { mode: 'success' | 'equals' | 'contains', value?: any }
+  expected     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, contractId, functionName])
 }
 
 // ---------------------------------------------------------------------------

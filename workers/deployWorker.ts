@@ -1,9 +1,11 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import type { Job } from 'bullmq';
 import { createWorker, DEPLOY_QUEUE_NAME } from '../queues/bullmq';
 import deploymentService from '../services/deploymentService';
 import socketService from '../services/socketService';
 import userService from '../services/userService';
+import { parseSpecFromWasmBase64 } from '../services/contractSpec';
 import prisma from '../lib/prisma';
 import type { LogEntry } from '../services/compilationService';
 
@@ -88,6 +90,20 @@ async function processDeployJob(job: Job) {
     socketService.emitJobStatus(jobId, result.success ? 'completed' : 'failed', jobResult);
 
     if (result.success && result.contractAddress) {
+      // Extract spec + wasm hash so the deployed contract can be invoked even if
+      // it was never compiled in this session.
+      let spec: any = undefined;
+      let wasmHash: string | undefined;
+      if (wasmBase64) {
+        wasmHash = crypto.createHash('sha256').update(Buffer.from(wasmBase64, 'base64')).digest('hex');
+        try {
+          const parsed = parseSpecFromWasmBase64(wasmBase64);
+          if (parsed.entries.length > 0) spec = parsed;
+        } catch (specError: any) {
+          console.warn(`[DeployWorker] Spec extraction skipped for ${projectId}:`, specError.message);
+        }
+      }
+
       // Record the deployment with the deployer's public key + contract id.
       try {
         await prisma.project.update({
@@ -95,6 +111,8 @@ async function processDeployJob(job: Job) {
           data: {
             lastDeployed: new Date(),
             contractAddress: result.contractAddress,
+            ...(spec ? { spec } : {}),
+            ...(wasmHash ? { wasmHash } : {}),
             deployments: {
               create: {
                 userId,
@@ -102,6 +120,8 @@ async function processDeployJob(job: Job) {
                 deployerPublicKey: result.walletAddress,
                 network: NETWORK,
                 status: 'success',
+                wasmHash: wasmHash ?? null,
+                spec: spec ?? undefined,
                 logs: (result.logs || []).map((log) => log.message)
               }
             }

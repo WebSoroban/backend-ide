@@ -17,11 +17,33 @@ RUN apt-get update && apt-get install -y \
 # Install wasm32v1 target for Rust 1.85+
 RUN rustup target add wasm32v1-none
 
-# Install Stellar CLI using cargo (official method)
-RUN cargo install --locked stellar-cli@25.2.0
+# Install the Stellar CLI from the official PREBUILT release binary instead of
+# `cargo install` — building stellar-cli/stellar-xdr from source needs 6-8GB+
+# RAM and OOM-kills (SIGKILL) on memory-constrained build hosts. Falls back to a
+# single-job cargo build only if no prebuilt artifact exists for the platform.
+ARG STELLAR_CLI_VERSION=25.2.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)        target="x86_64-unknown-linux-gnu" ;; \
+      aarch64|arm64) target="aarch64-unknown-linux-gnu" ;; \
+      *) echo "unsupported arch: $arch"; exit 1 ;; \
+    esac; \
+    url="https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-${target}.tar.gz"; \
+    echo "Downloading prebuilt Stellar CLI: $url"; \
+    if curl -fsSL "$url" -o /tmp/stellar-cli.tar.gz; then \
+      tar -xzf /tmp/stellar-cli.tar.gz -C /usr/local/bin; \
+      rm -f /tmp/stellar-cli.tar.gz; \
+      chmod +x /usr/local/bin/stellar; \
+    else \
+      echo "Prebuilt download failed; falling back to single-job cargo build"; \
+      CARGO_BUILD_JOBS=1 cargo install --locked stellar-cli@${STELLAR_CLI_VERSION}; \
+      cp /usr/local/cargo/bin/stellar /usr/local/bin/stellar; \
+    fi; \
+    stellar --version
 
 # Create symlink for backward compatibility (soroban -> stellar)
-RUN ln -s /usr/local/cargo/bin/stellar /usr/local/cargo/bin/soroban
+RUN ln -s /usr/local/bin/stellar /usr/local/bin/soroban
 
 # Add cargo bin to PATH
 ENV PATH="/usr/local/cargo/bin:$PATH"

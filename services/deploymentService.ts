@@ -217,7 +217,7 @@ class DeploymentService {
         throw new Error('Failed to extract contract ID from deployment output');
       }
 
-      log('success', `Contract deployed successfully with ID: ${contractId}`);
+      log('success', `Contract deployed: ${contractId}`);
 
       return {
         success: true,
@@ -371,7 +371,7 @@ class DeploymentService {
         output = 'Function executed successfully (no return value)';
       }
 
-      log('success', 'Contract function invoked successfully');
+      log('success', 'Function invoked.');
       log('info', `Output: ${output}`);
 
       return { success: true, logs, output, contractId, functionName, args };

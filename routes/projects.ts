@@ -488,7 +488,7 @@ impl EscrowContract {
     pub fn create_escrow(env: Env, buyer: Address, seller: Address, amount: i128) -> u32 {
         buyer.require_auth();
         
-        let escrow_count_key = symbol_short!("escrow_count");
+        let escrow_count_key = symbol_short!("esc_count");
         let escrow_count: u32 = env.storage().instance().get(&escrow_count_key).unwrap_or(0);
         let escrow_id = escrow_count + 1;
         
@@ -755,7 +755,7 @@ impl AuctionContract {
     pub fn create_auction(env: Env, seller: Address, starting_bid: i128, duration: u64) -> u32 {
         seller.require_auth();
         
-        let auction_count_key = symbol_short!("auction_count");
+        let auction_count_key = symbol_short!("auc_count");
         let auction_count: u32 = env.storage().instance().get(&auction_count_key).unwrap_or(0);
         let auction_id = auction_count + 1;
         
@@ -765,10 +765,10 @@ impl AuctionContract {
         let seller_key = symbol_short!("seller");
         env.storage().instance().set(&seller_key, &seller);
         
-        let highest_bid_key = symbol_short!("highest_bid");
+        let highest_bid_key = symbol_short!("high_bid");
         env.storage().instance().set(&highest_bid_key, &starting_bid);
         
-        let highest_bidder_key = symbol_short!("highest_bidder");
+        let highest_bidder_key = symbol_short!("high_bidr");
         env.storage().instance().set(&highest_bidder_key, &seller);
         
         let end_time_key = symbol_short!("end_time");
@@ -789,7 +789,7 @@ impl AuctionContract {
             panic!("Auction ended");
         }
         
-        let highest_bid_key = symbol_short!("highest_bid");
+        let highest_bid_key = symbol_short!("high_bid");
         let highest_bid: i128 = env.storage().instance().get(&highest_bid_key).unwrap();
         
         if amount <= highest_bid {
@@ -799,7 +799,7 @@ impl AuctionContract {
         // Update highest bid
         env.storage().instance().set(&highest_bid_key, &amount);
         
-        let highest_bidder_key = symbol_short!("highest_bidder");
+        let highest_bidder_key = symbol_short!("high_bidr");
         env.storage().instance().set(&highest_bidder_key, &bidder);
     }
     
@@ -817,7 +817,7 @@ impl AuctionContract {
     }
     
     pub fn get_highest_bid(env: Env, auction_id: u32) -> i128 {
-        let highest_bid_key = symbol_short!("highest_bid");
+        let highest_bid_key = symbol_short!("high_bid");
         env.storage().instance().get(&highest_bid_key).unwrap()
     }
 }`
@@ -871,6 +871,508 @@ mod test {
         assert_eq!(auction_id, 1);
     }
 }`
+        }
+      ];
+    } else if (template === 'data-store') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, Env, Symbol};
+
+#[contract]
+pub struct DataStore;
+
+#[contractimpl]
+impl DataStore {
+    pub fn put(env: Env, key: Symbol, value: i128) {
+        env.storage().persistent().set(&key, &value);
+    }
+
+    pub fn get(env: Env, key: Symbol) -> i128 {
+        env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    pub fn has(env: Env, key: Symbol) -> bool {
+        env.storage().persistent().has(&key)
+    }
+
+    pub fn remove(env: Env, key: Symbol) {
+        env.storage().persistent().remove(&key);
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "data-store-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'name-registry') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol};
+
+#[contract]
+pub struct NameRegistry;
+
+#[contractimpl]
+impl NameRegistry {
+    pub fn register(env: Env, name: Symbol, owner: Address) {
+        owner.require_auth();
+        let key = symbol_short!("names");
+        let mut names: Map<Symbol, Address> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        if names.contains_key(name.clone()) {
+            panic!("Name already registered");
+        }
+        names.set(name, owner);
+        env.storage().instance().set(&key, &names);
+    }
+
+    pub fn resolve(env: Env, name: Symbol) -> Address {
+        let key = symbol_short!("names");
+        let names: Map<Symbol, Address> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        names.get(name).unwrap()
+    }
+
+    pub fn is_registered(env: Env, name: Symbol) -> bool {
+        let key = symbol_short!("names");
+        let names: Map<Symbol, Address> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        names.contains_key(name)
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "name-registry-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'tip-jar') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map};
+
+#[contract]
+pub struct TipJar;
+
+#[contractimpl]
+impl TipJar {
+    pub fn tip(env: Env, from: Address, amount: i128) -> i128 {
+        from.require_auth();
+        let tips_key = symbol_short!("tips");
+        let mut tips: Map<Address, i128> =
+            env.storage().instance().get(&tips_key).unwrap_or(Map::new(&env));
+        let current = tips.get(from.clone()).unwrap_or(0);
+        tips.set(from, current + amount);
+        env.storage().instance().set(&tips_key, &tips);
+
+        let total_key = symbol_short!("total");
+        let total: i128 = env.storage().instance().get(&total_key).unwrap_or(0);
+        let new_total = total + amount;
+        env.storage().instance().set(&total_key, &new_total);
+        new_total
+    }
+
+    pub fn tips_from(env: Env, addr: Address) -> i128 {
+        let tips_key = symbol_short!("tips");
+        let tips: Map<Address, i128> =
+            env.storage().instance().get(&tips_key).unwrap_or(Map::new(&env));
+        tips.get(addr).unwrap_or(0)
+    }
+
+    pub fn total_tips(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("total")).unwrap_or(0)
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "tip-jar-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'pausable') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+#[contract]
+pub struct Pausable;
+
+#[contractimpl]
+impl Pausable {
+    pub fn init(env: Env, admin: Address) {
+        env.storage().instance().set(&symbol_short!("admin"), &admin);
+        env.storage().instance().set(&symbol_short!("paused"), &false);
+    }
+
+    pub fn pause(env: Env) {
+        let admin: Address = env.storage().instance().get(&symbol_short!("admin")).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&symbol_short!("paused"), &true);
+    }
+
+    pub fn unpause(env: Env) {
+        let admin: Address = env.storage().instance().get(&symbol_short!("admin")).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&symbol_short!("paused"), &false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&symbol_short!("paused")).unwrap_or(false)
+    }
+
+    pub fn do_action(env: Env) -> u32 {
+        let paused: bool = env.storage().instance().get(&symbol_short!("paused")).unwrap_or(false);
+        if paused {
+            panic!("Contract is paused");
+        }
+        let key = symbol_short!("counter");
+        let current: u32 = env.storage().instance().get(&key).unwrap_or(0);
+        let next = current + 1;
+        env.storage().instance().set(&key, &next);
+        next
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "pausable-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'whitelist') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map};
+
+#[contract]
+pub struct Whitelist;
+
+#[contractimpl]
+impl Whitelist {
+    pub fn init(env: Env, admin: Address) {
+        env.storage().instance().set(&symbol_short!("admin"), &admin);
+    }
+
+    pub fn add(env: Env, account: Address) {
+        let admin: Address = env.storage().instance().get(&symbol_short!("admin")).unwrap();
+        admin.require_auth();
+        let key = symbol_short!("list");
+        let mut list: Map<Address, bool> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        list.set(account, true);
+        env.storage().instance().set(&key, &list);
+    }
+
+    pub fn remove(env: Env, account: Address) {
+        let admin: Address = env.storage().instance().get(&symbol_short!("admin")).unwrap();
+        admin.require_auth();
+        let key = symbol_short!("list");
+        let mut list: Map<Address, bool> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        list.remove(account);
+        env.storage().instance().set(&key, &list);
+    }
+
+    pub fn is_listed(env: Env, account: Address) -> bool {
+        let key = symbol_short!("list");
+        let list: Map<Address, bool> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+        list.get(account).unwrap_or(false)
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "whitelist-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'crowdfund') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+#[contract]
+pub struct Crowdfund;
+
+#[contractimpl]
+impl Crowdfund {
+    pub fn init(env: Env, goal: i128) {
+        env.storage().instance().set(&symbol_short!("goal"), &goal);
+        env.storage().instance().set(&symbol_short!("total"), &0i128);
+    }
+
+    pub fn contribute(env: Env, from: Address, amount: i128) -> i128 {
+        from.require_auth();
+        let key = symbol_short!("total");
+        let total: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let new_total = total + amount;
+        env.storage().instance().set(&key, &new_total);
+        new_total
+    }
+
+    pub fn total(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("total")).unwrap_or(0)
+    }
+
+    pub fn goal(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("goal")).unwrap_or(0)
+    }
+
+    pub fn reached(env: Env) -> bool {
+        let total: i128 = env.storage().instance().get(&symbol_short!("total")).unwrap_or(0);
+        let goal: i128 = env.storage().instance().get(&symbol_short!("goal")).unwrap_or(0);
+        total >= goal
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "crowdfund-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
+        }
+      ];
+    } else if (template === 'timelock') {
+      defaultFiles = [
+        {
+          name: 'lib.rs',
+          type: 'file',
+          content: `#![no_std]
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+#[contract]
+pub struct Timelock;
+
+#[contractimpl]
+impl Timelock {
+    pub fn lock(env: Env, from: Address, amount: i128, unlock_time: u64) {
+        from.require_auth();
+        env.storage().instance().set(&symbol_short!("owner"), &from);
+        env.storage().instance().set(&symbol_short!("amount"), &amount);
+        env.storage().instance().set(&symbol_short!("unlock"), &unlock_time);
+    }
+
+    pub fn claim(env: Env, to: Address) -> i128 {
+        to.require_auth();
+        let unlock: u64 = env.storage().instance().get(&symbol_short!("unlock")).unwrap_or(0);
+        if env.ledger().timestamp() < unlock {
+            panic!("Funds are still locked");
+        }
+        let amount: i128 = env.storage().instance().get(&symbol_short!("amount")).unwrap_or(0);
+        env.storage().instance().set(&symbol_short!("amount"), &0i128);
+        amount
+    }
+
+    pub fn unlock_at(env: Env) -> u64 {
+        env.storage().instance().get(&symbol_short!("unlock")).unwrap_or(0)
+    }
+
+    pub fn locked_amount(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("amount")).unwrap_or(0)
+    }
+}`
+        },
+        {
+          name: 'Cargo.toml',
+          type: 'file',
+          content: `[package]
+name = "timelock-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true`
+        },
+        {
+          name: '.cargo/config.toml',
+          type: 'file',
+          content: `[target.wasm32v1-none]
+rustflags = [
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=--no-entry"
+]`
         }
       ];
     } else {

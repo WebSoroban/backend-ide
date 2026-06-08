@@ -105,7 +105,10 @@ router.post('/purchase', authenticate, async (req: Request, res: Response) => {
     const paymentAddress = process.env.PAYMENT_ADDRESS || 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
     const network = process.env.PAYMENT_NETWORK || 'testnet';
 
-    const memo = crypto.randomUUID();
+    // Stellar text memos are capped at 28 bytes. A UUID (36 chars) overflows and
+    // makes `Memo.text(memo)` throw on the client. Use a short, unique token
+    // ("WS" + 24 hex chars = 26 bytes) that still fits and stays collision-safe.
+    const memo = `WS${crypto.randomBytes(12).toString('hex')}`;
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 30);

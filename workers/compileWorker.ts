@@ -1,8 +1,11 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import type { Job } from 'bullmq';
 import { createWorker, COMPILE_QUEUE_NAME } from '../queues/bullmq';
 import compilationService, { type LogEntry } from '../services/compilationService';
 import socketService from '../services/socketService';
+import { parseSpecFromWasmBase64 } from '../services/contractSpec';
+import { parseDiagnostics } from '../services/diagnostics';
 import prisma from '../lib/prisma';
 
 // Initialize socket service for Redis pub/sub (workers don't have Socket.IO instance)
@@ -57,9 +60,13 @@ async function processCompileJob(job: Job) {
 
     const result: any = await compilationService.compileProject(projectId, files, updateJobLogs, jobId);
 
+    // Structured diagnostics (level/file/line/message) for inline editor markers.
+    const diagnostics = parseDiagnostics(result.logs || []);
+
     const jobResult = {
       success: result.success,
       logs: result.logs,
+      diagnostics,
       wasmBase64: result.wasmBase64 || result.output?.wasm,
       wasmFile: result.output?.wasmFile,
       compilationType: result.compilationType,
@@ -70,7 +77,7 @@ async function processCompileJob(job: Job) {
       where: { id: jobId },
       data: {
         status: result.success ? 'completed' : 'failed',
-        result: jobResult,
+        result: jobResult as any,
         error: result.success ? null : (result.error || 'Compilation failed')
       }
     });
@@ -78,10 +85,25 @@ async function processCompileJob(job: Job) {
     // Emit final status via WebSocket
     socketService.emitJobStatus(jobId, result.success ? 'completed' : 'failed', jobResult);
 
-    // Touch project updatedAt if successful
+    // Touch project updatedAt + extract & persist the contract spec (feeds invoke).
     if (result.success) {
+      const wasmBase64: string | undefined = result.wasmBase64 || result.output?.wasm;
+      const projectData: any = { updatedAt: new Date() };
+      if (wasmBase64) {
+        projectData.wasmHash = crypto.createHash('sha256').update(Buffer.from(wasmBase64, 'base64')).digest('hex');
+        try {
+          const parsed = parseSpecFromWasmBase64(wasmBase64);
+          if (parsed.entries.length > 0) {
+            projectData.spec = parsed as any;
+            console.log(`[CompileWorker] Extracted spec for project ${projectId}: ${parsed.functions.length} fns`);
+          }
+        } catch (specError: any) {
+          // Non-fatal (e.g. fallback/mock wasm) — compile still succeeds.
+          console.warn(`[CompileWorker] Spec extraction skipped for ${projectId}:`, specError.message);
+        }
+      }
       try {
-        await prisma.project.update({ where: { id: projectId }, data: { updatedAt: new Date() } });
+        await prisma.project.update({ where: { id: projectId }, data: projectData });
         console.log(`[CompileWorker] Updated project ${projectId} with compilation result`);
       } catch (updateError: any) {
         console.warn(`[CompileWorker] Could not update project ${projectId}:`, updateError.message);

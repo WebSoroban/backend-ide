@@ -172,7 +172,7 @@ else
     log "Stellar CLI not available, skipping optimization"
 fi
 
-success "Compilation successful! WASM file generated."
+success "Compilation complete. WASM generated."
 
 # Output the WASM file path for the API
 echo "WASM_FILE_PATH=/workspace/output/contract.wasm" 
