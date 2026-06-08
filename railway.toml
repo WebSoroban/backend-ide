@@ -1,3 +1,8 @@
+# API service ONLY. This is the default config Railway applies to a service with
+# no custom config path. The compile/deploy WORKER services must each point at
+# their own file (railway.worker-compile.toml / railway.worker-deploy.toml) via
+# Settings → Config-as-code → Railway Config File — otherwise they inherit this
+# API start command + health check and never run the worker process.
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"

@@ -1,0 +1,15 @@
+# Railway config for the COMPILE worker service.
+#
+# Point the worker-compile service at this file:
+#   Service → Settings → Config-as-code → Railway Config File = railway.worker-compile.toml
+#
+# No healthcheckPath: workers don't run an HTTP server, so a health check would
+# fail and restart them in a loop.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfiles/Dockerfile.worker"
+
+[deploy]
+startCommand = "node dist/workers/compileWorker.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
