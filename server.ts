@@ -12,6 +12,7 @@ import authRoutes from './routes/auth';
 import projectsRoutes from './routes/projects';
 import compileRoutes from './routes/compile';
 import deployRoutes from './routes/deploy';
+import testRoutes from './routes/test';
 import templatesRoutes from './routes/templates';
 import jobsRoutes from './routes/jobs';
 import subscriptionsRoutes from './routes/subscriptions';
@@ -124,6 +125,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectsRoutes);
 app.use('/api/compile', compileRoutes);
 app.use('/api/deploy', deployRoutes);
+app.use('/api/test', testRoutes);
 app.use('/api/templates', templatesRoutes);
 app.use('/api/jobs', jobsRoutes);
 // Commented out invite system - replaced with premium gifting

@@ -87,6 +87,28 @@ services:
     deploy:
       replicas: 1
 
+  worker-test:
+    build:
+      context: .
+      dockerfile: Dockerfiles/Dockerfile.worker
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_TYPE=test
+      - TEST_WORKER_CONCURRENCY=${TEST_WORKER_CONCURRENCY:-2}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./temp:/app/temp
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
   compiler:
     build:
       context: .

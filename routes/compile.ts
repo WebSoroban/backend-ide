@@ -22,7 +22,7 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
     // Verify project belongs to user
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, userId: true }
+      select: { id: true, userId: true, manifestPath: true, deployTarget: true }
     });
     if (!project) {
       return res.status(404).json({
@@ -42,12 +42,15 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
     const jobId = crypto.randomUUID();
     const bullJobId = `compile-${jobId}`;
 
-    // Enqueue compile job
+    // Enqueue compile job (carry the build config so the worker materializes the
+    // tree from the right manifest and surfaces the right crate's wasm).
     const bullJob = await addCompileJob({
       projectId,
       files,
       jobId,
-      userId: user.id
+      userId: user.id,
+      manifestPath: project.manifestPath,
+      deployTarget: project.deployTarget
     });
 
     // Verify BullMQ job was created

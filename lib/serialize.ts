@@ -28,6 +28,8 @@ export function serializeProject(project: any): any {
     ? project.files.map((f: any) => ({
         _id: f.id,
         id: f.id,
+        // `path` is the project-relative tree path; `name` is its leaf segment.
+        path: f.path,
         name: f.name,
         type: f.type,
         content: f.content
@@ -53,6 +55,8 @@ export function serializeProject(project: any): any {
     contractAddress: project.contractAddress,
     lastDeployed: project.lastDeployed,
     isLocal: project.isLocal,
+    manifestPath: project.manifestPath,
+    deployTarget: project.deployTarget,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt
   };

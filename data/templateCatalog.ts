@@ -29,6 +29,84 @@ export interface Template {
 
 export const TEMPLATE_CATALOG: Template[] = [
   {
+    id: 'counter-mf',
+    name: 'Counter (multi-file)',
+    description: 'A persistent counter split across modules — the contract entrypoint in src/lib.rs, instance storage in src/storage.rs, and event publishing in src/events.rs — with a unit test and an integration test. A clean starting point for a real multi-file project.',
+    category: 'Multi-file',
+    files: ['src/lib.rs', 'src/storage.rs', 'src/events.rs', 'tests/counter.rs', 'Cargo.toml', '.cargo/config.toml'],
+    price: 0,
+    documentation: {
+      summary: 'increment/decrement/reset mutate a u32 in instance storage and publish a "count" event; get reads it. Storage access is isolated in src/storage.rs and event publishing in src/events.rs, so the entrypoint stays small. Shows how a Soroban crate spans modules while still compiling to a single contract wasm.',
+      usage: 'Deploy, then call increment()/decrement()/reset(); read with get().',
+      functions: [
+        { name: 'increment', params: ['env: Env'], returns: 'u32', description: 'Increments and returns the new value.' },
+        { name: 'decrement', params: ['env: Env'], returns: 'u32', description: 'Decrements (saturating at 0) and returns the new value.' },
+        { name: 'get', params: ['env: Env'], returns: 'u32', description: 'Returns the current value.' },
+        { name: 'reset', params: ['env: Env'], returns: 'void', description: 'Resets the counter to zero.' }
+      ],
+      readMore: 'Use this to learn the module layout of a Soroban contract: src/lib.rs declares `mod storage;` and `mod events;`, and the build picks them up automatically. The unit test lives inside src/storage.rs; the integration test in tests/counter.rs drives the generated client.'
+    }
+  },
+  {
+    id: 'access-control-mf',
+    name: 'Access Control (multi-file)',
+    description: 'An admin-gated contract: an admin module enforces authorization on state-changing functions, kept separate from the storage module. The access-control pattern most contracts need.',
+    category: 'Multi-file',
+    files: ['src/lib.rs', 'src/admin.rs', 'src/storage.rs', 'tests/access.rs', 'Cargo.toml', '.cargo/config.toml'],
+    price: 0,
+    documentation: {
+      summary: 'init sets the admin once. set_value and transfer_admin call admin::require_admin (which loads the stored admin and calls require_auth), so only the admin can change state or hand off the role; value is public. The admin logic lives in src/admin.rs and is reusable across your own functions.',
+      usage: 'init(admin); admin calls set_value/transfer_admin; anyone reads value().',
+      functions: [
+        { name: 'init', params: ['env: Env', 'admin: Address'], returns: 'void', description: 'Sets the admin once.' },
+        { name: 'admin', params: ['env: Env'], returns: 'Address', description: 'Returns the current admin.' },
+        { name: 'set_value', params: ['env: Env', 'value: u32'], returns: 'void', description: 'Admin-only: set the stored value.' },
+        { name: 'value', params: ['env: Env'], returns: 'u32', description: 'Reads the stored value.' },
+        { name: 'transfer_admin', params: ['env: Env', 'new_admin: Address'], returns: 'void', description: 'Admin-only: transfer the admin role.' }
+      ],
+      readMore: 'Drop src/admin.rs into your own contract and call require_admin at the top of any privileged function. The integration test in tests/access.rs shows mock_all_auths + Address::generate for testing authorized calls.'
+    }
+  },
+  {
+    id: 'token-mf',
+    name: 'Token / SEP-41 (multi-file)',
+    description: 'A fungible token split into storage, admin, balance, allowance, and metadata modules — the SEP-41 shape (initialize, mint, transfer, approve, transfer_from, allowance, metadata). The realistic layout for a production token.',
+    category: 'Multi-file',
+    files: ['src/lib.rs', 'src/storage.rs', 'src/admin.rs', 'src/balance.rs', 'src/allowance.rs', 'src/metadata.rs', 'tests/token.rs', 'Cargo.toml', '.cargo/config.toml'],
+    price: 0,
+    documentation: {
+      summary: 'initialize sets admin + metadata. mint is admin-only; transfer moves balance with the sender\'s auth; approve/allowance/transfer_from implement the spender allowance flow. Each concern is its own module: balances in src/balance.rs (persistent storage), allowances in src/allowance.rs (temporary storage with expiration), the DataKey enum and types in src/storage.rs, admin checks in src/admin.rs, and name/symbol/decimals in src/metadata.rs.',
+      usage: 'initialize(admin, decimals, name, symbol); admin mints; holders transfer/approve; spenders transfer_from.',
+      functions: [
+        { name: 'initialize', params: ['env: Env', 'admin: Address', 'decimals: u32', 'name: String', 'symbol: String'], returns: 'void', description: 'Sets admin and metadata (once).' },
+        { name: 'mint', params: ['env: Env', 'to: Address', 'amount: i128'], returns: 'void', description: 'Admin-only: mint tokens.' },
+        { name: 'balance', params: ['env: Env', 'id: Address'], returns: 'i128', description: 'Balance of an address.' },
+        { name: 'transfer', params: ['env: Env', 'from: Address', 'to: Address', 'amount: i128'], returns: 'void', description: 'Transfer with sender auth.' },
+        { name: 'approve', params: ['env: Env', 'from: Address', 'spender: Address', 'amount: i128', 'expiration_ledger: u32'], returns: 'void', description: 'Set a spender allowance.' },
+        { name: 'transfer_from', params: ['env: Env', 'spender: Address', 'from: Address', 'to: Address', 'amount: i128'], returns: 'void', description: 'Spend an allowance.' }
+      ],
+      readMore: 'This mirrors how the reference SEP-41 token is organized. Extend it with burn, total supply tracking, and full allowance expiration enforcement, then follow the SEP-41 interface so wallets and other contracts can interact with it.'
+    }
+  },
+  {
+    id: 'workspace-factory',
+    name: 'Workspace: Factory + Child (cross-contract)',
+    description: 'A Cargo workspace with two deployable contracts — a child counter and a factory that calls it via a cross-contract call. Shows the workspace layout, per-member crates, and how one contract invokes another. Deploy target defaults to the factory.',
+    category: 'Multi-file',
+    files: ['Cargo.toml', '.cargo/config.toml', 'contracts/child/Cargo.toml', 'contracts/child/src/lib.rs', 'contracts/factory/Cargo.toml', 'contracts/factory/src/lib.rs', 'contracts/factory/tests/cross.rs'],
+    price: 0,
+    documentation: {
+      summary: 'The root Cargo.toml declares a [workspace] with two members. contracts/child is a simple counter; contracts/factory holds an Address of a deployed child and calls child.increment()/get() through the generated ChildClient — a real cross-contract call. Because there are two deployable crates, deploying prompts for a target (defaulted here to "factory").',
+      usage: 'Deploy the child first, then the factory; call factory.bump(child_address) to increment the child across contracts.',
+      functions: [
+        { name: 'bump', params: ['env: Env', 'child: Address'], returns: 'u32', description: 'Factory: cross-contract increment of the child counter.' },
+        { name: 'read', params: ['env: Env', 'child: Address'], returns: 'u32', description: 'Factory: cross-contract read of the child counter.' },
+        { name: 'increment', params: ['env: Env'], returns: 'u32', description: 'Child: increment its own counter.' }
+      ],
+      readMore: 'This is the starting point for factory/registry patterns and any design where contracts compose. The integration test in contracts/factory/tests/cross.rs registers both contracts in one test env and drives the cross-contract call with the soroban testutils.'
+    }
+  },
+  {
     id: 'hello-world',
     name: 'Hello World',
     description: 'A minimal Soroban contract that returns a greeting. The smallest complete example — use it to verify your toolchain, deploy, and invoke flow end to end before building anything real.',

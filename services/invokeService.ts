@@ -123,18 +123,82 @@ export async function getSpecForContract(contractId: string): Promise<ParsedSpec
   return null;
 }
 
-/** Coerce form values into the shapes `funcArgsToScVals` expects (mainly Bytes hex). */
+/**
+ * Coerce a single form value (the web UI sends everything as a string) into the
+ * JS type `funcArgsToScVals`/`nativeToScVal` expects for the given spec type:
+ *   u32/i32           -> number
+ *   u64/i64/u128/i128/u256/i256/Timepoint/Duration -> bigint
+ *   bool              -> boolean
+ *   Bytes/BytesN<n>   -> Buffer (from hex)
+ *   Option<T>         -> null for empty, else coerce(T)
+ *   Vec<T>            -> array, each element coerce(T)
+ * Anything else (String/Symbol/Address/UDT/Map/...) is passed through unchanged.
+ */
+function coerceScalar(type: string, v: any): any {
+  if (v === undefined || v === null) return v;
+
+  // Option<T>: empty string / null means "no value"; otherwise coerce the inner.
+  const opt = type.match(/^Option<(.+)>$/);
+  if (opt) {
+    if (v === '' || v === null) return null;
+    return coerceScalar(opt[1].trim(), v);
+  }
+
+  // Vec<T>: accept a JS array or a JSON-ish string, coerce each element.
+  const vec = type.match(/^Vec<(.+)>$/);
+  if (vec) {
+    let arr = v;
+    if (typeof arr === 'string') {
+      try { arr = JSON.parse(arr); } catch { return v; }
+    }
+    return Array.isArray(arr) ? arr.map((el) => coerceScalar(vec[1].trim(), el)) : v;
+  }
+
+  switch (type) {
+    case 'u32':
+    case 'i32': {
+      if (typeof v === 'number') return v;
+      const s = String(v).trim();
+      if (s === '' || !/^-?\d+$/.test(s)) return v; // let the SDK surface a clear error
+      return Number(s);
+    }
+    case 'u64':
+    case 'i64':
+    case 'u128':
+    case 'i128':
+    case 'u256':
+    case 'i256':
+    case 'Timepoint':
+    case 'Duration': {
+      if (typeof v === 'bigint') return v;
+      const s = String(v).trim();
+      if (s === '' || !/^-?\d+$/.test(s)) return v;
+      try { return BigInt(s); } catch { return v; }
+    }
+    case 'bool': {
+      if (typeof v === 'boolean') return v;
+      const s = String(v).trim().toLowerCase();
+      if (s === 'true' || s === '1') return true;
+      if (s === 'false' || s === '0' || s === '') return false;
+      return v;
+    }
+    default:
+      if (/^Bytes/.test(type) && typeof v === 'string') {
+        const hex = v.startsWith('0x') ? v.slice(2) : v;
+        return Buffer.from(hex, 'hex');
+      }
+      return v;
+  }
+}
+
+/** Coerce form values into the shapes `funcArgsToScVals` expects (per spec type). */
 function coerceArgs(spec: ParsedSpec, functionName: string, args: Record<string, any>): Record<string, any> {
   const fn = spec.functions.find((f) => f.name === functionName);
   if (!fn) return args;
   const out: Record<string, any> = { ...args };
   for (const input of fn.inputs) {
-    const v = out[input.name];
-    if (v === undefined || v === null) continue;
-    if (/^Bytes/.test(input.type) && typeof v === 'string') {
-      const hex = v.startsWith('0x') ? v.slice(2) : v;
-      out[input.name] = Buffer.from(hex, 'hex');
-    }
+    if (!(input.name in out)) continue;
+    out[input.name] = coerceScalar(input.type, out[input.name]);
   }
   return out;
 }

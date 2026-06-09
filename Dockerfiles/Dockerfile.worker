@@ -87,8 +87,10 @@ CMD if [ "$WORKER_TYPE" = "compile" ]; then \
       node dist/workers/compileWorker.js; \
     elif [ "$WORKER_TYPE" = "deploy" ]; then \
       node dist/workers/deployWorker.js; \
+    elif [ "$WORKER_TYPE" = "test" ]; then \
+      node dist/workers/testWorker.js; \
     else \
-      echo "Invalid WORKER_TYPE: $WORKER_TYPE. Must be 'compile' or 'deploy'"; \
+      echo "Invalid WORKER_TYPE: $WORKER_TYPE. Must be 'compile', 'deploy', or 'test'"; \
       exit 1; \
     fi
 

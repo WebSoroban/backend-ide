@@ -6,6 +6,7 @@ import { addDeployJob } from '../queues/deployQueue';
 import deploymentService from '../services/deploymentService';
 import walletService from '../services/wallet';
 import { authenticate } from '../middleware/auth';
+import { validateProject } from '../services/projectLayout';
 
 const router = express.Router();
 
@@ -40,7 +41,7 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
     // Verify project belongs to user
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, userId: true }
+      include: { files: { select: { path: true, name: true, content: true } } }
     });
     if (!project) {
       return res.status(404).json({
@@ -56,6 +57,19 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
       });
     }
 
+    // Workspace projects with more than one deployable contract require an
+    // explicit deploy target. The compiled wasm corresponds to whichever target
+    // was selected at compile time; without one we don't know what to deploy.
+    const layout = validateProject(project.files, project.manifestPath);
+    if (layout.isWorkspace && layout.deployableCrates.length > 1 && !project.deployTarget) {
+      return res.status(400).json({
+        success: false,
+        error: 'This workspace has multiple deployable contracts. Choose a deploy target first.',
+        code: 'DEPLOY_TARGET_REQUIRED',
+        choices: layout.deployableCrates.map((c) => ({ name: c.name, dir: c.dir }))
+      });
+    }
+
     // Generate the job id up front so we can build the BullMQ job id.
     const jobId = crypto.randomUUID();
     const bullJobId = `deploy-${jobId}`;
@@ -66,7 +80,8 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
       wasmBase64,
       network: NETWORK,
       jobId,
-      userId: user.id
+      userId: user.id,
+      deployTarget: project.deployTarget
     });
 
     if (!bullJob || !bullJob.id) {

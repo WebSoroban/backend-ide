@@ -9,8 +9,10 @@
     "typecheck": "tsc --noEmit",
     "worker:compile": "node dist/workers/compileWorker.js",
     "worker:deploy": "node dist/workers/deployWorker.js",
+    "worker:test": "node dist/workers/testWorker.js",
     "worker:compile:dev": "tsx watch workers/compileWorker.ts",
     "worker:deploy:dev": "tsx watch workers/deployWorker.ts",
+    "worker:test:dev": "tsx watch workers/testWorker.ts",
     "setup": "./setup.sh",
     "build": "prisma generate && tsc",
     "postinstall": "prisma generate",
@@ -19,6 +21,7 @@
     "migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "generate-invites": "tsx scripts/generate-invites.ts",
+    "backfill:file-paths": "tsx scripts/backfill-file-paths.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

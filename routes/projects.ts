@@ -3,8 +3,26 @@ import prisma from '../lib/prisma';
 import { serializeProject } from '../lib/serialize';
 import { authenticate } from '../middleware/auth';
 import { FREE_TEMPLATE_IDS } from '../data/templateCatalog';
+import { legacyNameToPath, sanitizeRelPath, baseName } from '../lib/paths';
+import { validateProject } from '../services/projectLayout';
+import { getBundle } from '../data/templateBundles';
 
 const router = express.Router();
+
+/**
+ * Normalize an incoming file record into a File row with a tree `path`. Accepts
+ * both the new shape ({ path }) and the legacy shape ({ name }). Throws (caught
+ * by the caller -> 400) on a malformed/escaping path — this is user input.
+ */
+function toFileRow(f: { path?: string; name?: string; type?: string; content?: string }) {
+  const rel = sanitizeRelPath((f.path && f.path.trim()) || legacyNameToPath(f.name || ''));
+  return {
+    path: rel,
+    name: baseName(rel),
+    type: f.type || 'file',
+    content: f.content || ''
+  };
+}
 
 // GET /api/projects - List all projects for current user
 router.get('/', authenticate, async (req: Request, res: Response) => {
@@ -28,11 +46,13 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
     const { name, files, template, isLocal } = req.body;
     const user = req.user;
     
-    let defaultFiles;
+    let defaultFiles: any[] | undefined;
+    let projManifestPath = 'Cargo.toml';
+    let projDeployTarget: string | null = null;
     const projectName = name || 'Untitled Project';
     // Convert project name to a valid crate name (lowercase, replace spaces with hyphens, remove special chars)
     const crateName = projectName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'contract';
-    
+
     // Premium template access: user must have purchased the template
     if (template && template !== 'blank' && template !== 'empty' && !FREE_TEMPLATE_IDS.includes(template)) {
       const purchased = user.purchasedTemplates || [];
@@ -45,7 +65,18 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
       }
     }
 
-    if (template === 'blank' || template === 'empty') {
+    // Multi-file template bundles scaffold the whole tree (path + content) and
+    // carry the build config (manifestPath, deployTarget). Legacy single-file
+    // templates fall through to the flat definitions below (toFileRow maps each
+    // flat name to its tree path, so they keep compiling/deploying identically).
+    const bundle = template ? getBundle(template) : null;
+    if (bundle) {
+      defaultFiles = bundle.files.map((f) => ({ path: f.path, content: f.content, type: 'file' }));
+      projManifestPath = bundle.manifestPath;
+      projDeployTarget = bundle.deployTarget ?? null;
+    }
+
+    if (!defaultFiles && (template === 'blank' || template === 'empty')) {
       // Create blank project with empty lib.rs, Cargo.toml with project name, and .cargo/config.toml
       defaultFiles = [
         {
@@ -1375,7 +1406,7 @@ rustflags = [
 ]`
         }
       ];
-    } else {
+    } else if (!defaultFiles) {
       // Default hello world template
       defaultFiles = files || [
         {
@@ -1429,18 +1460,21 @@ rustflags = [
       ];
     }
 
+    let fileRows;
+    try {
+      fileRows = (defaultFiles as any[]).map(toFileRow);
+    } catch (e: any) {
+      return res.status(400).json({ error: `Invalid file path: ${e.message}` });
+    }
+
     const project = await prisma.project.create({
       data: {
         name: projectName,
         userId: user.id,
         isLocal: isLocal === true || isLocal === 'true',
-        files: {
-          create: defaultFiles.map((f) => ({
-            name: f.name,
-            type: f.type || 'file',
-            content: f.content || ''
-          }))
-        }
+        manifestPath: projManifestPath,
+        deployTarget: projDeployTarget,
+        files: { create: fileRows }
       },
       include: { files: true, deployments: true }
     });
@@ -1473,11 +1507,44 @@ router.get('/:id', authenticate, async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/projects/:id/build-info - layout analysis for the build/deploy UI.
+// Reports whether the project is a workspace, which crates are deployable, the
+// current deploy target, and any pre-flight validation errors — so the IDE can
+// prompt for a deployTarget before deploying a multi-contract workspace.
+router.get('/:id/build-info', authenticate, async (req: Request, res: Response) => {
+  try {
+    const user = req.user;
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      include: { files: { select: { path: true, name: true, content: true } } }
+    });
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.userId !== user.id) {
+      return res.status(403).json({ error: 'You do not have permission to access this project' });
+    }
+
+    const v = validateProject(project.files, project.manifestPath);
+    res.json({
+      manifestPath: project.manifestPath,
+      deployTarget: project.deployTarget,
+      isWorkspace: v.isWorkspace,
+      ok: v.ok,
+      errors: v.errors,
+      warnings: v.warnings,
+      deployableCrates: v.deployableCrates.map((c) => ({ name: c.name, dir: c.dir })),
+      // True when the user MUST pick a deploy target before deploying.
+      requiresTargetSelection: v.isWorkspace && v.deployableCrates.length > 1 && !project.deployTarget
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to analyze project' });
+  }
+});
+
 // PUT /api/projects/:id - Update project
 router.put('/:id', authenticate, async (req: Request, res: Response) => {
   try {
     const user = req.user;
-    const { name, files } = req.body;
+    const { name, files, manifestPath, deployTarget } = req.body;
 
     // Verify project belongs to user
     const existingProject = await prisma.project.findUnique({
@@ -1492,21 +1559,45 @@ router.put('/:id', authenticate, async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'You do not have permission to update this project' });
     }
 
-    // Update name and (if provided) replace the file set atomically.
-    await prisma.$transaction(async (tx) => {
-      if (name !== undefined) {
-        await tx.project.update({ where: { id: req.params.id }, data: { name } });
+    // Validate + normalize incoming file paths up front so a bad path is a clean
+    // 400 (not a transaction rollback -> 500). User input — sanitize every path.
+    let fileRows: ReturnType<typeof toFileRow>[] | null = null;
+    if (files !== undefined && Array.isArray(files)) {
+      try {
+        fileRows = files.map(toFileRow);
+      } catch (e: any) {
+        return res.status(400).json({ error: `Invalid file path: ${e.message}` });
       }
-      if (files !== undefined) {
+      const seen = new Set<string>();
+      for (const r of fileRows) {
+        if (seen.has(r.path)) return res.status(400).json({ error: `Duplicate file path: ${r.path}` });
+        seen.add(r.path);
+      }
+    }
+
+    let safeManifest: string | undefined;
+    if (manifestPath !== undefined) {
+      try {
+        safeManifest = sanitizeRelPath(manifestPath);
+      } catch (e: any) {
+        return res.status(400).json({ error: `Invalid manifestPath: ${e.message}` });
+      }
+    }
+
+    // Update name/build-config and (if provided) replace the file set atomically.
+    await prisma.$transaction(async (tx) => {
+      const projData: any = {};
+      if (name !== undefined) projData.name = name;
+      if (safeManifest !== undefined) projData.manifestPath = safeManifest;
+      if (deployTarget !== undefined) projData.deployTarget = deployTarget || null;
+      if (Object.keys(projData).length > 0) {
+        await tx.project.update({ where: { id: req.params.id }, data: projData });
+      }
+      if (fileRows !== null) {
         await tx.file.deleteMany({ where: { projectId: req.params.id } });
-        if (Array.isArray(files) && files.length > 0) {
+        if (fileRows.length > 0) {
           await tx.file.createMany({
-            data: files.map((f) => ({
-              projectId: req.params.id,
-              name: f.name,
-              type: f.type || 'file',
-              content: f.content || ''
-            }))
+            data: fileRows.map((r) => ({ projectId: req.params.id, ...r }))
           });
         }
         // Touch updatedAt even if name wasn't changed.

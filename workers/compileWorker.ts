@@ -29,7 +29,7 @@ async function updateLatestUsageLog(userId: string, action: string, projectId: s
  * Process compile job
  */
 async function processCompileJob(job: Job) {
-  const { projectId, files, jobId, userId } = job.data;
+  const { projectId, files, jobId, userId, manifestPath, deployTarget } = job.data;
 
   console.log(`[CompileWorker] Processing compile job ${job.id} for project ${projectId}`);
 
@@ -58,7 +58,10 @@ async function processCompileJob(job: Job) {
       }
     };
 
-    const result: any = await compilationService.compileProject(projectId, files, updateJobLogs, jobId);
+    const result: any = await compilationService.compileProject(projectId, files, updateJobLogs, jobId, {
+      manifestPath,
+      deployTarget
+    });
 
     // Structured diagnostics (level/file/line/message) for inline editor markers.
     const diagnostics = parseDiagnostics(result.logs || []);

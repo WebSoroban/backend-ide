@@ -34,7 +34,7 @@ async function updateLatestUsageLog(userId: string, action: string, projectId: s
  * own Stellar testnet wallet (loaded server-side inside deploymentService).
  */
 async function processDeployJob(job: Job) {
-  const { projectId, wasmBase64, jobId, userId } = job.data;
+  const { projectId, wasmBase64, jobId, userId, deployTarget } = job.data;
 
   console.log(`[DeployWorker] Processing deploy job ${job.id} for project ${projectId}`);
 
@@ -121,6 +121,7 @@ async function processDeployJob(job: Job) {
                 network: NETWORK,
                 status: 'success',
                 wasmHash: wasmHash ?? null,
+                deployTarget: deployTarget ?? null,
                 spec: spec ?? undefined,
                 logs: (result.logs || []).map((log) => log.message)
               }

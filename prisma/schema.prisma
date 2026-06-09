@@ -77,20 +77,28 @@ model Wallet {
 // Project + File (embedded files array -> related File rows)
 // ---------------------------------------------------------------------------
 model Project {
-  id              String   @id @default(cuid())
-  name            String   @default("Untitled Project")
+  id              String    @id @default(cuid())
+  name            String    @default("Untitled Project")
   userId          String
   contractAddress String?
   lastDeployed    DateTime?
-  isLocal         Boolean  @default(false)
+  isLocal         Boolean   @default(false)
+  // Multi-file build configuration.
+  // `manifestPath` is the project-relative path of the Cargo manifest that
+  // drives the build (almost always the root "Cargo.toml"; for a nested layout
+  // it could be e.g. "contracts/token/Cargo.toml").
+  manifestPath    String    @default("Cargo.toml")
+  // For [workspace] manifests with multiple deployable members, the crate/
+  // package name whose WASM gets deployed. Null for single-crate projects.
+  deployTarget    String?
   // Parsed contract interface ({ entries, functions }) extracted from the
   // compiled WASM's `contractspecv0` section. Drives the type-aware invoke form.
   spec            Json?
   // SHA-256 of the last compiled/deployed WASM — used for deploy idempotency
   // and build caching.
   wasmHash        String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   files       File[]
@@ -103,6 +111,12 @@ model Project {
 model File {
   id        String   @id @default(cuid())
   projectId String
+  // `path` is the project-relative POSIX path (e.g. "src/lib.rs",
+  // "src/admin/mod.rs", "tests/integration.rs", ".cargo/config.toml"). The tree
+  // is derived from path segments — there is no separate Folder table.
+  // `name` is kept as the display/leaf name (last path segment) for backward
+  // compatibility with the existing API contract.
+  path      String
   name      String
   type      String   @default("file")
   content   String   @default("")
@@ -111,6 +125,7 @@ model File {
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
+  @@unique([projectId, path])
   @@index([projectId])
 }
 
@@ -127,6 +142,9 @@ model Deployment {
   network           String   @default("testnet")
   status            String   @default("success")
   wasmHash          String?
+  // For workspace projects: the crate/package name that was deployed. Null for
+  // single-crate projects. Lets multiple deployable members be tracked per row.
+  deployTarget      String?
   spec              Json?
   logs              String[] @default([])
   createdAt         DateTime @default(now())

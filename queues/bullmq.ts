@@ -38,6 +38,7 @@ connection.on('reconnecting', () => {
 // Queue names
 const COMPILE_QUEUE_NAME = 'compile';
 const DEPLOY_QUEUE_NAME = 'deploy';
+const TEST_QUEUE_NAME = 'test';
 
 /**
  * Create a queue instance
@@ -93,7 +94,8 @@ export {
   createWorker,
   createQueueEvents,
   COMPILE_QUEUE_NAME,
-  DEPLOY_QUEUE_NAME
+  DEPLOY_QUEUE_NAME,
+  TEST_QUEUE_NAME
 };
 
 export default {
@@ -102,5 +104,6 @@ export default {
   createWorker,
   createQueueEvents,
   COMPILE_QUEUE_NAME,
-  DEPLOY_QUEUE_NAME
+  DEPLOY_QUEUE_NAME,
+  TEST_QUEUE_NAME
 };

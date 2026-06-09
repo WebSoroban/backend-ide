@@ -11,13 +11,15 @@ export interface DeployJobPayload {
   jobId: string;
   userId?: string;
   walletInfo?: any;
+  /** Workspace member being deployed (recorded on the Deployment row). */
+  deployTarget?: string | null;
 }
 
 /**
  * Add a deploy job to the queue
  */
 async function addDeployJob(payload: DeployJobPayload): Promise<Job> {
-  const { projectId, wasmBase64, network = 'testnet', jobId, userId, walletInfo } = payload;
+  const { projectId, wasmBase64, network = 'testnet', jobId, userId, walletInfo, deployTarget } = payload;
 
   if (!projectId || !wasmBase64 || !jobId) {
     throw new Error('Missing required parameters: projectId, wasmBase64, and jobId');
@@ -31,7 +33,8 @@ async function addDeployJob(payload: DeployJobPayload): Promise<Job> {
       network,
       jobId,
       userId,
-      walletInfo
+      walletInfo,
+      deployTarget
     },
     {
       jobId: `deploy-${jobId}`, // Use MongoDB job ID as BullMQ job ID
