@@ -102,6 +102,24 @@ export function humanizeError(raw: string): string {
   return firstLine.length > 300 ? firstLine.slice(0, 300) + '…' : firstLine || 'Invocation failed';
 }
 
+// Per-contract spec cache. A contract's interface is immutable for its address
+// (re-deploys mint a new id), so the parsed spec + built Spec object can be
+// reused across invokes — skipping a DB read and XDR decode on the hot path.
+const specCache = new Map<string, { spec: ParsedSpec; specObj: any }>();
+const SPEC_CACHE_MAX = 200;
+
+function cacheSpec(contractId: string, spec: ParsedSpec, specObj: any) {
+  if (specCache.size >= SPEC_CACHE_MAX) {
+    const oldest = specCache.keys().next().value;
+    if (oldest !== undefined) specCache.delete(oldest);
+  }
+  specCache.set(contractId, { spec, specObj });
+}
+
+export function invalidateSpecCache(contractId: string) {
+  specCache.delete(contractId);
+}
+
 /** Resolve the parsed spec for a contract: stored on Project, else from chain. */
 export async function getSpecForContract(contractId: string): Promise<ParsedSpec | null> {
   const project = await prisma.project.findFirst({
@@ -239,30 +257,38 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
     if (clientRef) socketService.emitJobStatus(clientRef, status, { contractId, functionName, ...extra });
   };
 
-  let spec = await getSpecForContract(contractId);
-  if (!spec) {
-    throw new Error('Contract spec unavailable. Recompile the contract to enable typed invoke.');
-  }
-
-  // Rebuild a contract.Spec from the stored entries. If the stored entries can't
-  // be decoded (e.g. truncated/older format -> "Bad union switch"), pull a fresh
-  // spec straight from the on-chain WASM and use that instead.
+  // Resolve the spec once and reuse it for subsequent invokes of this contract.
+  let spec: ParsedSpec;
   let specObj: any;
-  try {
-    specObj = buildSpec(spec.entries);
-  } catch (err: any) {
-    const fresh = await fetchSpecFromChain(contractId);
-    if (!fresh || fresh.entries.length === 0) {
-      throw new Error(
-        `Could not decode the contract interface (${err.message}). Recompile and redeploy the contract.`,
-      );
+  const cached = specCache.get(contractId);
+  if (cached) {
+    ({ spec, specObj } = cached);
+  } else {
+    const resolved = await getSpecForContract(contractId);
+    if (!resolved) {
+      throw new Error('Contract spec unavailable. Recompile the contract to enable typed invoke.');
     }
+    spec = resolved;
+    // Rebuild a contract.Spec from the stored entries. If they can't be decoded
+    // (e.g. truncated/older format -> "Bad union switch"), pull a fresh spec
+    // straight from the on-chain WASM and use that instead.
     try {
-      specObj = buildSpec(fresh.entries);
-    } catch (err2: any) {
-      throw new Error(`Could not decode the contract interface: ${err2.message}`);
+      specObj = buildSpec(spec.entries);
+    } catch (err: any) {
+      const fresh = await fetchSpecFromChain(contractId);
+      if (!fresh || fresh.entries.length === 0) {
+        throw new Error(
+          `Could not decode the contract interface (${err.message}). Recompile and redeploy the contract.`,
+        );
+      }
+      try {
+        specObj = buildSpec(fresh.entries);
+      } catch (err2: any) {
+        throw new Error(`Could not decode the contract interface: ${err2.message}`);
+      }
+      spec = fresh;
     }
-    spec = fresh;
+    cacheSpec(contractId, spec, specObj);
   }
 
   const coerced = coerceArgs(spec, functionName, args);
@@ -446,4 +472,4 @@ async function persistInvocation(data: {
   }
 }
 
-export default { invoke, getSpecForContract, humanizeError };
+export default { invoke, getSpecForContract, humanizeError, invalidateSpecCache };

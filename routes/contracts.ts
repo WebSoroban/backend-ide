@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import prisma from '../lib/prisma';
 import { authenticate, optionalAuth } from '../middleware/auth';
 import invokeService, { getSpecForContract } from '../services/invokeService';
+import userService from '../services/userService';
 
 const router = express.Router();
 
@@ -139,6 +140,22 @@ router.post('/:contractId/tests/run', authenticate, async (req: Request, res: Re
       orderBy: { createdAt: 'asc' },
     });
 
+    // Enforce the plan's function-test quota before running (only when there is
+    // something to run, so an empty list never burns quota).
+    if (tests.length > 0) {
+      const user = await prisma.user.findUnique({ where: { id: req.userId! } });
+      const gate = await userService.canTestFunction(user);
+      if (!gate.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: gate.reason,
+          current: gate.current,
+          limit: gate.limit,
+          upgradeRequired: true,
+        });
+      }
+    }
+
     const results = [];
     for (const test of tests) {
       let outcome: any;
@@ -168,6 +185,29 @@ router.post('/:contractId/tests/run', authenticate, async (req: Request, res: Re
     }
 
     const passed = results.filter((r) => r.status === 'pass').length;
+
+    // Track the run for /analytics and the plan's usage meter. One run = one
+    // unit (mirrors how a deploy is counted); per-case detail lives in metadata.
+    if (results.length > 0) {
+      const project = await prisma.project.findFirst({
+        where: { contractAddress: contractId, userId: req.userId! },
+        select: { id: true },
+      });
+      await prisma.usageLog.create({
+        data: {
+          userId: req.userId!,
+          action: 'function_test',
+          projectId: project?.id ?? null,
+          contractAddress: contractId,
+          functionName: functionName ?? null,
+          success: passed === results.length,
+          metadata: { total: results.length, passed, failed: results.length - passed },
+        },
+      }).catch((err) => console.warn('[Contracts] usageLog (function_test) failed:', err.message));
+      await userService.incrementFunctionTest(req.userId!)
+        .catch((err) => console.warn('[Contracts] incrementFunctionTest failed:', err.message));
+    }
+
     res.json({ success: true, total: results.length, passed, results });
   } catch (error: any) {
     res.status(500).json({ success: false, error: 'Failed to run tests', message: error.message });
