@@ -43,9 +43,9 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
 // POST /api/projects - Create new project
 router.post('/', authenticate, async (req: Request, res: Response) => {
   try {
-    const { name, files, template, isLocal } = req.body;
+    const { name, files, template, isLocal, manifestPath: bodyManifestPath, deployTarget: bodyDeployTarget } = req.body;
     const user = req.user;
-    
+
     let defaultFiles: any[] | undefined;
     let projManifestPath = 'Cargo.toml';
     let projDeployTarget: string | null = null;
@@ -1458,6 +1458,22 @@ rustflags = [
 ]`
         }
       ];
+    }
+
+    // Wizard-generated projects pass raw files plus their own build config
+    // (e.g. an OpenZeppelin workspace whose deploy target is a member crate).
+    // Honor it only when there's no built-in bundle/template driving the layout.
+    if (!bundle && files) {
+      if (typeof bodyManifestPath === 'string' && bodyManifestPath.trim()) {
+        try {
+          projManifestPath = sanitizeRelPath(bodyManifestPath);
+        } catch (e: any) {
+          return res.status(400).json({ error: `Invalid manifestPath: ${e.message}` });
+        }
+      }
+      if (bodyDeployTarget !== undefined) {
+        projDeployTarget = typeof bodyDeployTarget === 'string' && bodyDeployTarget.trim() ? bodyDeployTarget.trim() : null;
+      }
     }
 
     let fileRows;

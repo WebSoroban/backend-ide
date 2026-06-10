@@ -7,6 +7,7 @@ import socketService from './socketService';
 import walletService from './wallet';
 import * as StellarSdk from '@stellar/stellar-sdk';
 import type { LogEntry } from './compilationService';
+import { parseSpecFromWasm } from './contractSpec';
 
 const execAsync = util.promisify(exec);
 
@@ -170,9 +171,42 @@ class DeploymentService {
       // Deploy. The secret is provided via STELLAR_ACCOUNT in the env only.
       log('info', 'Deploying contract...');
       const deployEnv = getStellarEnv(secret);
+
+      // If the contract has a constructor, supply the deployer's own address for
+      // every Address parameter (owner/recipient/admin/minter). This is what the
+      // OpenZeppelin templates and the wizard's ownable contracts expect, so they
+      // instantiate out of the box. Non-Address required args can't be defaulted.
+      const deployArgs = ['contract', 'deploy', '--wasm', wasmPath, '--network', 'testnet', '--alias', projectId];
+      try {
+        const ctor = parseSpecFromWasm(wasmBuffer).functions.find((f) => f.name === '__constructor');
+        if (ctor && ctor.inputs.length) {
+          const ctorArgs: string[] = [];
+          const filled: string[] = [];
+          const skipped: string[] = [];
+          for (const input of ctor.inputs) {
+            const base = input.type.replace(/^Option<(.*)>$/, '$1');
+            if (base === 'Address' || base === 'MuxedAddress') {
+              ctorArgs.push(`--${input.name}`, publicKey);
+              filled.push(input.name);
+            } else {
+              skipped.push(`${input.name}: ${input.type}`);
+            }
+          }
+          if (ctorArgs.length) {
+            deployArgs.push('--', ...ctorArgs);
+            log('info', `Constructor detected — using your wallet address for: ${filled.join(', ')}`);
+          }
+          if (skipped.length) {
+            log('warning', `Constructor needs values this deploy can't default (${skipped.join(', ')}); it may fail without manual args.`);
+          }
+        }
+      } catch (e: any) {
+        console.warn('[DeploymentService] constructor arg detection skipped:', e?.message);
+      }
+
       const deployProcess = spawn(
         'stellar',
-        ['contract', 'deploy', '--wasm', wasmPath, '--network', 'testnet', '--alias', projectId],
+        deployArgs,
         { stdio: ['pipe', 'pipe', 'pipe'], env: deployEnv }
       );
 

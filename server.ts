@@ -21,6 +21,7 @@ import paymentsRoutes from './routes/payments';
 import usageRoutes from './routes/usage';
 import contractsRoutes from './routes/contracts';
 import walletRoutes from './routes/wallet';
+import userTemplatesRoutes from './routes/userTemplates';
 
 // Boot marker — if this prints, all module imports (incl. the Stellar CLI check
 // in deploymentService) resolved without hanging.
@@ -136,6 +137,7 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/usage', usageRoutes);
 app.use('/api/contracts', contractsRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/user-templates', userTemplatesRoutes);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {

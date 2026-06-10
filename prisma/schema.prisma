@@ -53,6 +53,7 @@ model User {
   templatePurchases TemplatePurchase[]
   invocations       Invocation[]
   functionTests     FunctionTest[]
+  userTemplates     UserTemplate[]
 
   @@index([authMethod])
 }
@@ -324,6 +325,31 @@ model UsageLog {
   @@index([userId, createdAt])
   @@index([userId, action, createdAt])
   @@index([contractAddress])
+}
+
+// ---------------------------------------------------------------------------
+// UserTemplate — a contract the user assembled in the customisation wizard and
+// saved for reuse. `config` is the wizard state (engine options + custom-function
+// defs) so re-opening restores the controls; `bundle` is the resolved multi-file
+// tree ({ files, manifestPath, deployTarget }) so it can scaffold without
+// re-running the generator. `engine` is 'oz' (OpenZeppelin wizard) or 'internal'
+// (WebSoroban composition engine); `type` is the contract kind (Fungible, NonFungible, counter, …).
+// ---------------------------------------------------------------------------
+model UserTemplate {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  type      String
+  engine    String
+  config    Json     @default("{}")
+  bundle    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, updatedAt])
 }
 
 // ---------------------------------------------------------------------------
