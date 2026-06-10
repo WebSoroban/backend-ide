@@ -46,22 +46,29 @@ async function processCompileJob(job: Job) {
   });
 
   try {
-    // Create callback to update job with logs incrementally
+    // Incremental log writes overwrite the whole `result` blob with an
+    // in-progress shape and are fire-and-forget, so a late one can land after the
+    // final result and flip `success` back to false. Track them, stop accepting
+    // new ones once finalized, and drain them before the final write.
+    const pendingLogWrites: Promise<any>[] = [];
+    let finalized = false;
     const updateJobLogs = async (logs: LogEntry[]) => {
-      try {
-        await prisma.job.update({
-          where: { id: jobId },
-          data: { result: { success: false, logs } as any }
-        });
-      } catch (err) {
-        console.error('Error updating job logs:', err);
-      }
+      if (finalized) return Promise.resolve();
+      const p = prisma.job
+        .update({ where: { id: jobId }, data: { result: { success: false, logs } as any } })
+        .catch((err) => console.error('Error updating job logs:', err));
+      pendingLogWrites.push(p);
+      return p;
     };
 
     const result: any = await compilationService.compileProject(projectId, files, updateJobLogs, jobId, {
       manifestPath,
       deployTarget
     });
+
+    // No more streaming writes; drain in-flight ones before the final write.
+    finalized = true;
+    await Promise.allSettled(pendingLogWrites);
 
     // Structured diagnostics (level/file/line/message) for inline editor markers.
     const diagnostics = parseDiagnostics(result.logs || []);

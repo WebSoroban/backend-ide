@@ -50,12 +50,21 @@ async function processDeployJob(job: Job) {
   });
 
   try {
+    // Streaming log writes overwrite the whole `result` blob with an in-progress
+    // shape. They are fire-and-forget from the deploy service, so a late one could
+    // land AFTER the final result and clobber `success: true` back to false — the
+    // contract deploys but the UI reports "Deployment failed". Track every write,
+    // stop accepting new ones once finalized, and drain them before the final
+    // write so the authoritative result is always last.
+    const pendingLogWrites: Promise<any>[] = [];
+    let finalized = false;
     const updateJobLogs = async (logs: LogEntry[]) => {
-      try {
-        await prisma.job.update({ where: { id: jobId }, data: { result: { success: false, logs } as any } });
-      } catch (err) {
-        console.error('Error updating deployment job logs:', err);
-      }
+      if (finalized) return Promise.resolve();
+      const p = prisma.job
+        .update({ where: { id: jobId }, data: { result: { success: false, logs } as any } })
+        .catch((err) => console.error('Error updating deployment job logs:', err));
+      pendingLogWrites.push(p);
+      return p;
     };
 
     // Deploy, signing with the user's wallet (loaded via userId).
@@ -68,32 +77,17 @@ async function processDeployJob(job: Job) {
       jobId
     );
 
-    const jobResult: any = {
-      success: result.success,
-      contractAddress: result.contractAddress,
-      network: result.network,
-      projectId: result.projectId,
-      walletAddress: result.walletAddress,
-      logs: result.logs,
-      error: result.error
-    };
+    // No more streaming writes; drain any in-flight ones before the final write.
+    finalized = true;
+    await Promise.allSettled(pendingLogWrites);
 
-    await prisma.job.update({
-      where: { id: jobId },
-      data: {
-        status: result.success ? 'completed' : 'failed',
-        result: jobResult,
-        error: result.success ? null : (result.error || 'Deployment failed')
-      }
-    });
-
-    socketService.emitJobStatus(jobId, result.success ? 'completed' : 'failed', jobResult);
-
+    // Persist the contract address + extracted spec to the project BEFORE marking
+    // the job complete. The invoke panel keys off the project's contractAddress +
+    // spec, so doing this first lets it load the contract interface the instant the
+    // UI sees success — no chain round-trip, no race against the job status.
+    let spec: any = undefined;
+    let wasmHash: string | undefined;
     if (result.success && result.contractAddress) {
-      // Extract spec + wasm hash so the deployed contract can be invoked even if
-      // it was never compiled in this session.
-      let spec: any = undefined;
-      let wasmHash: string | undefined;
       if (wasmBase64) {
         wasmHash = crypto.createHash('sha256').update(Buffer.from(wasmBase64, 'base64')).digest('hex');
         try {
@@ -132,7 +126,31 @@ async function processDeployJob(job: Job) {
       } catch (updateError: any) {
         console.warn(`[DeployWorker] Could not update project ${projectId}:`, updateError.message);
       }
+    }
 
+    const jobResult: any = {
+      success: result.success,
+      contractAddress: result.contractAddress,
+      network: result.network,
+      projectId: result.projectId,
+      walletAddress: result.walletAddress,
+      logs: result.logs,
+      error: result.error
+    };
+
+    await prisma.job.update({
+      where: { id: jobId },
+      data: {
+        status: result.success ? 'completed' : 'failed',
+        result: jobResult,
+        error: result.success ? null : (result.error || 'Deployment failed')
+      }
+    });
+
+    socketService.emitJobStatus(jobId, result.success ? 'completed' : 'failed', jobResult);
+
+    // Usage accounting (after completion; not needed to invoke the contract).
+    if (result.success && result.contractAddress) {
       // Increment user deployment count + mark usage log successful
       if (userId) {
         try {
