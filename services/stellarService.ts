@@ -191,6 +191,34 @@ async function submitCreate(network: NetworkId, signedXdr: string): Promise<{ tx
   return { txHash: hash, contractId };
 }
 
+/**
+ * CUSTODIAL deploy (mainnet opt-in) — sign both steps in-memory with the user's
+ * keypair and submit, all via the SDK. Runs in the API process (no Stellar CLI
+ * needed). The secret never leaves memory and is never logged.
+ */
+async function deployCustodial(
+  network: NetworkId,
+  keypair: any,
+  wasmBase64: string,
+): Promise<{ contractId: string; txHash: string; feeXlm: string }> {
+  const passphrase = getNetwork(network).passphrase;
+  const sourcePk = keypair.publicKey();
+
+  // Step 1: upload the wasm.
+  const up = await prepareUpload(network, sourcePk, wasmBase64);
+  const upTx = TransactionBuilder.fromXDR(up.xdr, passphrase);
+  upTx.sign(keypair);
+  await submitSignedXdr(network, upTx.toXDR());
+
+  // Step 2: instantiate the contract.
+  const cr = await prepareCreate(network, sourcePk, up.wasmHashHex, wasmBase64);
+  const crTx = TransactionBuilder.fromXDR(cr.xdr, passphrase);
+  crTx.sign(keypair);
+  const res = await submitCreate(network, crTx.toXDR());
+
+  return { contractId: res.contractId, txHash: res.txHash, feeXlm: cr.feeXlm };
+}
+
 function safe(x: any): string {
   try {
     if (!x) return 'unknown error';
@@ -208,5 +236,6 @@ export default {
   prepareCreate,
   submitCreate,
   submitSignedXdr,
+  deployCustodial,
 };
-export { prepareUpload, submitUpload, prepareCreate, submitCreate, submitSignedXdr };
+export { prepareUpload, submitUpload, prepareCreate, submitCreate, submitSignedXdr, deployCustodial };

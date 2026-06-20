@@ -418,17 +418,19 @@ router.post('/custodial', authenticate, async (req: Request, res: Response) => {
     const canDeploy = await userService.canDeploy(user);
     if (!canDeploy.allowed) return res.status(403).json({ success: false, error: canDeploy.reason, upgradeRequired: true });
 
-    const result = await deploymentService.deployContract(projectId, wasmBase64, network, user.id);
-    if (result.success && result.contractAddress) {
-      await recordDeployment({
-        projectId, userId: user.id, network, contractAddress: result.contractAddress,
-        deployerPublicKey: result.walletAddress || '', wasmBase64, deployTarget: project.deployTarget,
-        logs: (result.logs || []).map((l) => l.message),
-      });
-    }
+    // Sign with the user's decrypted key via the SDK (in-memory, no Stellar CLI —
+    // the API container doesn't ship the CLI; the SDK runs here directly).
+    await walletService.getOrCreateWallet(user.id);
+    const keypair = await walletService.loadKeypair(user.id);
+    const r = await stellarService.deployCustodial(network, keypair, wasmBase64);
+
+    await recordDeployment({
+      projectId, userId: user.id, network, contractAddress: r.contractId,
+      deployerPublicKey: keypair.publicKey(), wasmBase64, deployTarget: project.deployTarget,
+    });
     res.json({
-      success: result.success, contractAddress: result.contractAddress, network, logs: result.logs, error: result.error,
-      explorer: result.contractAddress ? explorerContract(network, result.contractAddress) : undefined,
+      success: true, contractAddress: r.contractId, txHash: r.txHash, network,
+      explorer: explorerContract(network, r.contractId),
     });
   } catch (error: any) {
     console.error('[Deploy] custodial error:', error.message);
