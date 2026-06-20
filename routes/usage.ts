@@ -3,6 +3,7 @@ import prisma from '../lib/prisma';
 import userService from '../services/userService';
 import { withId } from '../lib/serialize';
 import { authenticate } from '../middleware/auth';
+import { requireAdmin } from '../middleware/admin';
 
 const router = express.Router();
 
@@ -86,7 +87,7 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
  * GET /api/usage/summary
  * Get aggregate usage statistics for the whole project (all users)
  */
-router.get('/summary', async (req: Request, res: Response) => {
+router.get('/summary', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -151,7 +152,7 @@ router.get('/summary', async (req: Request, res: Response) => {
  * GET /api/usage/activity
  * Get recent activity logs for all users (platform-wide for analytics)
  */
-router.get('/activity', async (req: Request, res: Response) => {
+router.get('/activity', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
     const logs = await prisma.usageLog.findMany({
@@ -183,6 +184,63 @@ router.get('/activity', async (req: Request, res: Response) => {
       error: 'Failed to get activity logs',
       message: error.message
     });
+  }
+});
+
+/**
+ * GET /api/usage/users  (admin only)
+ * User directory with per-user aggregate counts, newest first. Supports
+ * ?q=<email/name search> and ?limit= (default 100, max 500).
+ */
+router.get('/users', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
+    const q = ((req.query.q as string) || '').trim();
+    const where: any = q
+      ? { OR: [{ email: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] }
+      : {};
+
+    const [total, users] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          picture: true,
+          authMethod: true,
+          subscription: true,
+          isActive: true,
+          createdAt: true,
+          lastLogin: true,
+          _count: { select: { projects: true, deployments: true, invocations: true, agentRuns: true } },
+        },
+      }),
+    ]);
+
+    const rows = users.map((u: any) => ({
+      id: u.id,
+      email: u.email,
+      name: u.name || null,
+      picture: u.picture || null,
+      authMethod: u.authMethod,
+      plan: (u.subscription && (u.subscription as any).plan) || 'free',
+      isActive: u.isActive,
+      createdAt: u.createdAt,
+      lastLogin: u.lastLogin,
+      projects: u._count.projects,
+      deployments: u._count.deployments,
+      invocations: u._count.invocations,
+      aiRuns: u._count.agentRuns,
+    }));
+
+    res.json({ success: true, total, returned: rows.length, users: rows });
+  } catch (error: any) {
+    console.error('Get users error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get users', message: error.message });
   }
 });
 

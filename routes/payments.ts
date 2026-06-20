@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import prisma from '../lib/prisma';
 import paymentService from '../services/paymentService';
 import { authenticate } from '../middleware/auth';
+import { requireAdmin } from '../middleware/admin';
 
 const router = express.Router();
 
@@ -146,7 +147,7 @@ router.get('/history', authenticate, async (req: Request, res: Response) => {
  * GET /api/payments/all
  * Get recent payment transactions for all users (platform-wide for analytics)
  */
-router.get('/all', async (req: Request, res: Response) => {
+router.get('/all', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
     const payments = await prisma.payment.findMany({
