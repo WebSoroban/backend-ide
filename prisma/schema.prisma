@@ -54,6 +54,11 @@ model User {
   invocations       Invocation[]
   functionTests     FunctionTest[]
   userTemplates     UserTemplate[]
+  chatThreads       ChatThread[]
+  chatMessages      ChatMessage[]
+  agentRuns         AgentRun[]
+  plans             Plan[]
+  aiSetting         AiSetting?
 
   @@index([authMethod])
 }
@@ -374,4 +379,149 @@ model TemplatePurchase {
 
   @@index([userId, templateId, status])
   @@index([status, createdAt])
+}
+
+// ===========================================================================
+// AI COPILOT
+// ---------------------------------------------------------------------------
+// A thread is one Cursor-style conversation. Each thread is pinned to a `mode`
+// (ask | agent | plan | debug | multitask) and a `model`; switching mode starts
+// a fresh context window (enforced in the harness). Messages hold the streamed
+// assistant text + collapsible reasoning; ToolCalls record every tool step
+// (read_file, run_compile, propose_edit, …) and their produced diffs. AgentRuns
+// are one execution of the tool loop — multitask spawns several child runs.
+// ===========================================================================
+
+// Per-user AI preferences (model + mode persistence) and an optional BYO
+// OpenRouter key, encrypted at rest with WALLET_ENCRYPTION_KEY like wallet
+// secrets — never stored or returned in plaintext.
+model AiSetting {
+  id                     String   @id @default(cuid())
+  userId                 String   @unique
+  selectedModel          String   @default("openrouter/auto")
+  mode                   String   @default("agent")
+  maxMode                Boolean  @default(false)
+  openRouterKeyEncrypted String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ChatThread {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String?
+  title     String   @default("New chat")
+  mode      String   @default("agent") // ask | agent | plan | debug | multitask
+  model     String   @default("openrouter/auto")
+  maxMode   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+  runs     AgentRun[]
+  plans    Plan[]
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  userId    String
+  role      String // user | assistant | tool | system
+  content   String   @default("")
+  // Collapsible chain-of-thought (reasoning tokens), shown behind a disclosure.
+  reasoning String?
+  // Attached @-context chips, model, finishReason, token usage, runId, etc.
+  meta      Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  thread    ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  toolCalls ToolCall[]
+
+  @@index([threadId, createdAt])
+}
+
+model ToolCall {
+  id        String   @id @default(cuid())
+  messageId String?
+  runId     String?
+  // OpenAI tool_call id, so streamed deltas reconcile to the right call.
+  callId    String?
+  name      String
+  args      Json     @default("{}")
+  result    Json?
+  status    String   @default("pending") // pending | running | success | error
+  // For propose_edit/create_file/delete_file: the unified diff for review.
+  diff      Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  message ChatMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  run     AgentRun?    @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([runId])
+}
+
+model AgentRun {
+  id          String  @id @default(cuid())
+  userId      String
+  threadId    String?
+  projectId   String?
+  // Set on multitask sub-runs; null for a top-level run.
+  parentRunId String?
+  mode        String  @default("agent")
+  model       String  @default("openrouter/auto")
+  maxMode     Boolean @default(false)
+  // queued | running | awaiting_confirm | completed | failed | cancelled
+  status      String  @default("queued")
+  prompt      String  @default("")
+  title       String  @default("")
+  bullJobId   String? @unique
+  // Snapshot of the project file tree taken before the run — powers per-run undo.
+  checkpoint  Json?
+  // Proposed edits (path + unified diff + new content) awaiting diff review.
+  diffs       Json    @default("[]")
+  result      Json?
+  error       String?
+  tokensIn    Int     @default(0)
+  tokensOut   Int     @default(0)
+  iterations  Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thread    ChatThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+  toolCalls ToolCall[]
+
+  @@index([userId, createdAt])
+  @@index([threadId])
+  @@index([parentRunId])
+  @@index([status, createdAt])
+}
+
+model Plan {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String?
+  threadId  String?
+  title     String   @default("Implementation Plan")
+  // Editable markdown (ordered steps, target file paths, TODO list, Mermaid).
+  content   String   @default("")
+  status    String   @default("draft") // draft | ready | building | done
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thread ChatThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
 }

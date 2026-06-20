@@ -109,6 +109,31 @@ services:
     deploy:
       replicas: 1
 
+  # AI Copilot agent worker. Uses the same toolchain image as the build workers
+  # because the agent's validation loop runs `stellar contract build` / `cargo
+  # test` / `cargo clippy` in-process. Needs OPENROUTER_API_KEY (from .env).
+  worker-agent:
+    build:
+      context: .
+      dockerfile: Dockerfiles/Dockerfile.worker
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_TYPE=agent
+      - AGENT_WORKER_CONCURRENCY=${AGENT_WORKER_CONCURRENCY:-4}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./temp:/app/temp
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
   compiler:
     build:
       context: .

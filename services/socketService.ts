@@ -45,12 +45,20 @@ class SocketService {
       // Subscribe to job log channels
       this.redisSubscriber.psubscribe('job:log:*');
       this.redisSubscriber.psubscribe('job:status:*');
+      // AI Copilot run streaming (tokens / reasoning / tool steps / status).
+      this.redisSubscriber.psubscribe('ai:run:*');
 
       // Handle messages from Redis and emit via Socket.IO
       this.redisSubscriber.on('pmessage', (pattern: string, channel: string, message: string) => {
         try {
           const data = JSON.parse(message);
           const jobId = channel.split(':').pop();
+
+          if (pattern === 'ai:run:*') {
+            // data = { runId, type, payload }
+            this.io!.to(`run:${data.runId}`).emit('ai:event', data);
+            return;
+          }
 
           console.log(`[SocketService] Received Redis message for job ${jobId}, pattern: ${pattern}`);
 
@@ -128,6 +136,24 @@ class SocketService {
       this.io.to(`job:${jobId}`).emit('job:logs', {
         jobId,
         logs: Array.isArray(logs) ? logs : []
+      });
+    }
+  }
+
+  /**
+   * Emit an AI Copilot run event (token / reasoning / tool step / status) to the
+   * `run:<runId>` Socket.IO room. Works from the agent worker too: it publishes
+   * to Redis (`ai:run:<runId>`) so the API process relays it to subscribers.
+   *
+   *   type: 'token' | 'reasoning' | 'tool' | 'status' | 'error' | 'message'
+   */
+  emitRunEvent(runId: string, type: string, payload: any = {}) {
+    const data = { runId, type, payload };
+    const io = this.io || global.io;
+    if (io) io.to(`run:${runId}`).emit('ai:event', data);
+    if (this.redisPublisher) {
+      this.redisPublisher.publish(`ai:run:${runId}`, JSON.stringify(data)).catch((err: any) => {
+        console.error('[SocketService] Error publishing ai run event to Redis:', err);
       });
     }
   }

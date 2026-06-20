@@ -22,6 +22,7 @@ import usageRoutes from './routes/usage';
 import contractsRoutes from './routes/contracts';
 import walletRoutes from './routes/wallet';
 import userTemplatesRoutes from './routes/userTemplates';
+import aiRoutes from './routes/ai';
 
 // Boot marker — if this prints, all module imports (incl. the Stellar CLI check
 // in deploymentService) resolved without hanging.
@@ -138,6 +139,7 @@ app.use('/api/usage', usageRoutes);
 app.use('/api/contracts', contractsRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/user-templates', userTemplatesRoutes);
+app.use('/api/ai', aiRoutes);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -153,6 +155,14 @@ io.on('connection', (socket) => {
   socket.on('unsubscribe:job', (jobId: string) => {
     console.log(`[Socket.IO] Client ${socket.id} unsubscribed from job: ${jobId}`);
     socket.leave(`job:${jobId}`);
+  });
+
+  // AI Copilot run streaming — join/leave the per-run room.
+  socket.on('subscribe:run', (runId: string) => {
+    socket.join(`run:${runId}`);
+  });
+  socket.on('unsubscribe:run', (runId: string) => {
+    socket.leave(`run:${runId}`);
   });
 
   socket.on('disconnect', () => {
