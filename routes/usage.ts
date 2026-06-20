@@ -41,6 +41,11 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
         total: logs.filter((l) => l.action === 'function_test').length,
         successful: logs.filter((l) => l.action === 'function_test' && l.success).length,
         failed: logs.filter((l) => l.action === 'function_test' && !l.success).length
+      },
+      invocations: {
+        total: logs.filter((l) => l.action === 'invoke').length,
+        successful: logs.filter((l) => l.action === 'invoke' && l.success).length,
+        failed: logs.filter((l) => l.action === 'invoke' && !l.success).length
       }
     };
 
@@ -92,9 +97,10 @@ router.get('/summary', async (req: Request, res: Response) => {
       take: 2000
     });
 
-    const totals: Record<string, number> = { compile: 0, deploy: 0, function_test: 0 };
-    // Deploys split by network (network lives in the log's metadata; default testnet).
+    const totals: Record<string, number> = { compile: 0, deploy: 0, function_test: 0, invoke: 0 };
+    // Deploys + invokes split by network (network lives in the log's metadata).
     const deployByNetwork: Record<string, number> = { testnet: 0, mainnet: 0 };
+    const invokeByNetwork: Record<string, number> = { testnet: 0, mainnet: 0 };
     const dailyMap = new Map<string, any>();
     const uniqueUsers = new Set<string>();
 
@@ -103,15 +109,14 @@ router.get('/summary', async (req: Request, res: Response) => {
 
       const action = log.action;
       if (totals[action] !== undefined) totals[action] += 1;
-      if (action === 'deploy') {
-        const net = (log.metadata && (log.metadata as any).network) === 'mainnet' ? 'mainnet' : 'testnet';
-        deployByNetwork[net] += 1;
-      }
+      const net = (log.metadata && (log.metadata as any).network) === 'mainnet' ? 'mainnet' : 'testnet';
+      if (action === 'deploy') deployByNetwork[net] += 1;
+      if (action === 'invoke') invokeByNetwork[net] += 1;
       if (log.userId) uniqueUsers.add(String(log.userId));
 
       const dateKey = log.createdAt.toISOString().slice(0, 10);
       if (!dailyMap.has(dateKey)) {
-        dailyMap.set(dateKey, { date: dateKey, compile: 0, deploy: 0, function_test: 0 });
+        dailyMap.set(dateKey, { date: dateKey, compile: 0, deploy: 0, function_test: 0, invoke: 0 });
       }
       const day = dailyMap.get(dateKey);
       if (day[action] !== undefined) day[action] += 1;
@@ -126,6 +131,7 @@ router.get('/summary', async (req: Request, res: Response) => {
         uniqueUsers: uniqueUsers.size,
         totals,
         deployByNetwork,
+        invokeByNetwork,
         periodStart: thirtyDaysAgo.toISOString(),
         periodEnd: new Date().toISOString()
       },

@@ -19,6 +19,13 @@ import { getNetwork, coerceNetwork, type NetworkId } from '../lib/networks';
 // Top up testnet again if the balance falls below this many XLM.
 const LOW_BALANCE_THRESHOLD = 10;
 
+// External HTTP calls (Horizon, Friendbot) get a hard timeout so a slow or
+// unreachable upstream can never hang an API request.
+const HTTP_TIMEOUT_MS = 10000;
+function fetchWithTimeout(url: string): Promise<Response> {
+  return fetch(url, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+}
+
 // Back-compat exports (some callers import these directly).
 export const FRIENDBOT_URL = getNetwork('testnet').friendbotUrl!;
 export const HORIZON_URL = getNetwork('testnet').horizonUrl;
@@ -31,7 +38,7 @@ export type MainnetSigningMode = 'connected' | 'custodial';
  */
 async function fundViaFriendbot(publicKey: string): Promise<boolean> {
   try {
-    const res = await fetch(`${FRIENDBOT_URL}/?addr=${encodeURIComponent(publicKey)}`);
+    const res = await fetchWithTimeout(`${FRIENDBOT_URL}/?addr=${encodeURIComponent(publicKey)}`);
     if (res.ok) return true;
     // 400 typically means "account already funded" — treat as success.
     const body = await res.text();
@@ -53,7 +60,7 @@ async function fundViaFriendbot(publicKey: string): Promise<boolean> {
 async function getBalance(publicKey: string, network: NetworkId = 'testnet'): Promise<number> {
   try {
     const horizon = getNetwork(network).horizonUrl;
-    const res = await fetch(`${horizon}/accounts/${encodeURIComponent(publicKey)}`);
+    const res = await fetchWithTimeout(`${horizon}/accounts/${encodeURIComponent(publicKey)}`);
     if (!res.ok) return 0;
     const account: any = await res.json();
     const native = (account.balances || []).find((b: any) => b.asset_type === 'native');

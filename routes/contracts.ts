@@ -5,8 +5,28 @@ import invokeService, { getSpecForContract, prepareInvoke, submitInvoke } from '
 import userService from '../services/userService';
 import walletService from '../services/wallet';
 import { coerceNetwork, getNetwork } from '../lib/networks';
+import { rateLimit } from '../middleware/rateLimit';
 
 const router = express.Router();
+
+// Per-user invoke budget (covers simulate + write + submit). Fail-open on Redis.
+const invokeLimiter = rateLimit({ windowSec: 60, max: 60, prefix: 'invoke' });
+
+/** Record a contract invoke in the activity log (state-changing calls only). */
+async function logInvoke(
+  userId: string,
+  projectId: string | null,
+  contractId: string,
+  functionName: string,
+  network: string,
+  success: boolean,
+) {
+  await prisma.usageLog
+    .create({
+      data: { userId, action: 'invoke', projectId, contractAddress: contractId, functionName, success, metadata: { network } },
+    })
+    .catch((e) => console.warn('[Contracts] usageLog (invoke) failed:', e.message));
+}
 
 /**
  * GET /api/contracts/:contractId/spec
@@ -35,7 +55,7 @@ router.get('/:contractId/spec', optionalAuth, async (req: Request, res: Response
  * Always simulates first; submits a signed tx only for state-changing calls when
  * execute === true.
  */
-router.post('/:contractId/invoke', authenticate, async (req: Request, res: Response) => {
+router.post('/:contractId/invoke', authenticate, invokeLimiter, async (req: Request, res: Response) => {
   try {
     const { contractId } = req.params;
     const { functionName, args = {}, execute = false, clientRef = null, sourcePk = null } = req.body;
@@ -86,6 +106,12 @@ router.post('/:contractId/invoke', authenticate, async (req: Request, res: Respo
       clientRef,
     });
 
+    // Count state-changing calls (custodial/testnet path) in analytics. Reads
+    // (simulations) are free and not logged. Connected-mainnet writes log on submit.
+    if (execute && !result.readOnly) {
+      await logInvoke(req.userId!, project?.id ?? null, contractId, functionName, network, !!result.success);
+    }
+
     res.json({ ...result, network });
   } catch (error: any) {
     console.error('[Contracts] Invoke error:', error);
@@ -98,7 +124,7 @@ router.post('/:contractId/invoke', authenticate, async (req: Request, res: Respo
  * Submit a wallet-signed XDR for a non-custodial (mainnet) write. Body:
  * { functionName, args, signedXdr, network, clientRef? }.
  */
-router.post('/:contractId/invoke/submit', authenticate, async (req: Request, res: Response) => {
+router.post('/:contractId/invoke/submit', authenticate, invokeLimiter, async (req: Request, res: Response) => {
   try {
     const { contractId } = req.params;
     const { functionName, args = {}, signedXdr, clientRef = null } = req.body;
@@ -114,6 +140,7 @@ router.post('/:contractId/invoke/submit', authenticate, async (req: Request, res
       contractId, functionName, args: typeof args === 'object' && !Array.isArray(args) ? args : {},
       signedXdr, network, userId: req.userId!, projectId: project?.id ?? null, clientRef,
     });
+    await logInvoke(req.userId!, project?.id ?? null, contractId, functionName, network, !!result.success);
     res.json({ ...result, network });
   } catch (error: any) {
     console.error('[Contracts] Invoke submit error:', error);

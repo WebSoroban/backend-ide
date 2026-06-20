@@ -21,10 +21,17 @@ import deploymentService from '../services/deploymentService';
 import userService from '../services/userService';
 import { COPILOT_MODES, type CopilotMode, type ProposedEdit } from '../services/ai/types';
 import { coerceNetwork } from '../lib/networks';
+import { rateLimit } from '../middleware/rateLimit';
 
 const router = express.Router();
 
 const NETWORK = 'testnet';
+
+// Per-user limits on the endpoints that start LLM work or spend on-chain. Reads
+// (thread/run/plan GETs) are unmetered. Fail-open if Redis is down.
+const aiLimiter = rateLimit({ windowSec: 60, max: 30, prefix: 'ai' });
+const aiHeavyLimiter = rateLimit({ windowSec: 60, max: 10, prefix: 'ai-heavy' });
+const deployLimiter = rateLimit({ windowSec: 60, max: 20, prefix: 'deploy' });
 
 function isMode(m: any): m is CopilotMode {
   return typeof m === 'string' && (COPILOT_MODES as string[]).includes(m);
@@ -178,7 +185,7 @@ router.delete('/threads/:id', authenticate, async (req: Request, res: Response) 
 // ---------------------------------------------------------------------------
 
 // POST /api/ai/threads/:id/messages — send a user turn and start an agent run.
-router.post('/threads/:id/messages', authenticate, async (req: Request, res: Response) => {
+router.post('/threads/:id/messages', authenticate, aiLimiter, async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const thread = await prisma.chatThread.findUnique({ where: { id: req.params.id } });
@@ -403,7 +410,7 @@ router.post('/runs/:id/undo', authenticate, async (req: Request, res: Response) 
 
 // POST /api/ai/runs/:id/deploy — GATED deploy: requires explicit confirm. The
 // agent never deploys inside its loop; this is the user-confirmed path.
-router.post('/runs/:id/deploy', authenticate, async (req: Request, res: Response) => {
+router.post('/runs/:id/deploy', authenticate, deployLimiter, async (req: Request, res: Response) => {
   try {
     if (req.body.confirm !== true) {
       return res.status(400).json({ error: 'Deployment requires explicit confirmation (confirm: true).' });
@@ -515,7 +522,7 @@ router.put('/plans/:id', authenticate, async (req: Request, res: Response) => {
 });
 
 // POST /api/ai/plans/:id/build — hand the (edited) plan to an Agent run.
-router.post('/plans/:id/build', authenticate, async (req: Request, res: Response) => {
+router.post('/plans/:id/build', authenticate, aiLimiter, async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const plan = await prisma.plan.findUnique({ where: { id: req.params.id } });
@@ -573,7 +580,7 @@ router.delete('/plans/:id', authenticate, async (req: Request, res: Response) =>
 // ---------------------------------------------------------------------------
 
 // POST /api/ai/multitask — { projectId, tasks: [{prompt, mode?, model?, maxMode?}], model?, maxMode? }
-router.post('/multitask', authenticate, async (req: Request, res: Response) => {
+router.post('/multitask', authenticate, aiHeavyLimiter, async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const { projectId, tasks, model, maxMode } = req.body;

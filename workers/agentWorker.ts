@@ -7,9 +7,11 @@ import { decrypt } from '../lib/crypto';
 import { runAgent, type PriorMessage, type RunInput } from '../services/ai/harness';
 import { completeChat } from '../services/ai/openrouter';
 import type { CopilotMode } from '../services/ai/types';
+import { initObservability, captureError } from '../lib/observability';
 
 // Workers don't own the Socket.IO instance — init pub/sub so emitRunEvent works.
 socketService.init(null);
+initObservability();
 
 const AGENT_WORKER_CONCURRENCY = parseInt(process.env.AGENT_WORKER_CONCURRENCY || '4', 10);
 
@@ -222,7 +224,7 @@ async function processAgentJob(job: Job) {
     await maybeFinalizeParent(run.parentRunId);
     console.log(`[AgentWorker] Run ${runId} completed (${out.iterations} iters, ${out.edits.length} edits)`);
   } catch (error: any) {
-    console.error(`[AgentWorker] Run ${runId} failed:`, error.message);
+    captureError(error, { worker: 'agent', runId });
     await prisma.agentRun
       .update({ where: { id: runId }, data: { status: 'failed', error: error.message } })
       .catch(() => {});
@@ -289,7 +291,7 @@ const worker = createWorker(AGENT_QUEUE_NAME, processAgentJob, { concurrency: AG
 
 worker.on('completed', (job) => console.log(`[AgentWorker] Job ${job.id} completed`));
 worker.on('failed', (job, err) => console.error(`[AgentWorker] Job ${job?.id} failed:`, err.message));
-worker.on('error', (err) => console.error('[AgentWorker] Worker error:', err));
+worker.on('error', (err) => captureError(err, { worker: 'agent', scope: 'worker' }));
 
 console.log(`[AgentWorker] Started with concurrency: ${AGENT_WORKER_CONCURRENCY}`);
 

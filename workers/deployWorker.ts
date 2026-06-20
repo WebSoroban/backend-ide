@@ -8,12 +8,11 @@ import userService from '../services/userService';
 import { parseSpecFromWasmBase64 } from '../services/contractSpec';
 import prisma from '../lib/prisma';
 import type { LogEntry } from '../services/compilationService';
+import { initObservability, captureError } from '../lib/observability';
 
 // Initialize socket service for Redis pub/sub (workers don't have Socket.IO instance)
 socketService.init(null);
-
-// Testnet only.
-const NETWORK = 'testnet';
+initObservability();
 
 // Worker concurrency
 const DEPLOY_WORKER_CONCURRENCY = parseInt(process.env.DEPLOY_WORKER_CONCURRENCY || '2', 10);
@@ -35,8 +34,11 @@ async function updateLatestUsageLog(userId: string, action: string, projectId: s
  */
 async function processDeployJob(job: Job) {
   const { projectId, wasmBase64, jobId, userId, deployTarget } = job.data;
+  // Network is carried on the job (testnet queue deploys + the mainnet custodial
+  // opt-in both run here, where the Stellar CLI is available). Defaults testnet.
+  const network: string = job.data.network || 'testnet';
 
-  console.log(`[DeployWorker] Processing deploy job ${job.id} for project ${projectId}`);
+  console.log(`[DeployWorker] Processing ${network} deploy job ${job.id} for project ${projectId}`);
 
   await prisma.job.update({
     where: { id: jobId },
@@ -71,7 +73,7 @@ async function processDeployJob(job: Job) {
     const result = await deploymentService.deployContract(
       projectId,
       wasmBase64,
-      NETWORK,
+      network,
       userId,
       updateJobLogs,
       jobId
@@ -112,7 +114,7 @@ async function processDeployJob(job: Job) {
                 userId,
                 contractAddress: result.contractAddress,
                 deployerPublicKey: result.walletAddress,
-                network: NETWORK,
+                network,
                 status: 'success',
                 wasmHash: wasmHash ?? null,
                 deployTarget: deployTarget ?? null,
@@ -158,7 +160,7 @@ async function processDeployJob(job: Job) {
           await updateLatestUsageLog(userId, 'deploy', projectId, {
             success: true,
             contractAddress: result.contractAddress,
-            metadata: { network: NETWORK, walletAddress: result.walletAddress }
+            metadata: { network, walletAddress: result.walletAddress }
           });
         } catch (userError: any) {
           console.warn(`[DeployWorker] Could not update user deployment count:`, userError.message);
@@ -169,7 +171,7 @@ async function processDeployJob(job: Job) {
         await updateLatestUsageLog(userId, 'deploy', projectId, {
           success: false,
           error: result.error || 'Deployment failed',
-          metadata: { network: NETWORK, error: result.error }
+          metadata: { network, error: result.error }
         });
       } catch (logError: any) {
         console.warn(`[DeployWorker] Could not update usage log:`, logError.message);
@@ -187,7 +189,7 @@ async function processDeployJob(job: Job) {
       logs: result.logs
     };
   } catch (error: any) {
-    console.error(`[DeployWorker] Error processing deploy job ${job.id}:`, error);
+    captureError(error, { worker: 'deploy', jobId, projectId, network });
 
     const errorLogs = [{
       type: 'error',
@@ -221,7 +223,7 @@ worker.on('failed', (job, err) => {
 });
 
 worker.on('error', (err) => {
-  console.error('[DeployWorker] Worker error:', err);
+  captureError(err, { worker: 'deploy', scope: 'worker' });
 });
 
 console.log(`[DeployWorker] Started with concurrency: ${DEPLOY_WORKER_CONCURRENCY}`);

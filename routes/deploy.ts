@@ -10,8 +10,13 @@ import { authenticate } from '../middleware/auth';
 import { validateProject } from '../services/projectLayout';
 import { parseSpecFromWasmBase64 } from '../services/contractSpec';
 import { coerceNetwork, getNetwork, explorerContract, type NetworkId } from '../lib/networks';
+import { rateLimit } from '../middleware/rateLimit';
 
 const router = express.Router();
+
+// Shared deploy budget per user (prefix matches routes/ai.ts so AI-initiated
+// deploys draw from the same bucket). Fail-open if Redis is unavailable.
+const deployLimiter = rateLimit({ windowSec: 60, max: 20, prefix: 'deploy' });
 
 // The queue-based custodial deploy is testnet only. Mainnet deploys are route-
 // driven (non-custodial sign-XDR by default, or an explicit custodial opt-in).
@@ -61,10 +66,25 @@ async function recordDeployment(opts: {
     },
   });
   await userService.incrementDeployment(opts.userId).catch(() => {});
+  // Record an activity log so mainnet (custodial + non-custodial) deploys show up
+  // in /analytics and count in the per-network deploy split. The testnet queue
+  // path logs this in routes/deploy POST `/` + the worker; this covers the rest.
+  await prisma.usageLog
+    .create({
+      data: {
+        userId: opts.userId,
+        action: 'deploy',
+        projectId: opts.projectId,
+        contractAddress: opts.contractAddress,
+        success: true,
+        metadata: { network: opts.network, walletAddress: opts.deployerPublicKey },
+      },
+    })
+    .catch((e) => console.warn('[Deploy] usageLog (deploy) failed:', e.message));
 }
 
 // POST /api/deploy - Deploy a smart contract (queued, signed with the user's wallet)
-router.post('/', authenticate, async (req: Request, res: Response) => {
+router.post('/', authenticate, deployLimiter, async (req: Request, res: Response) => {
   try {
     const { projectId, wasmBase64 } = req.body;
     const user = req.user!;
@@ -191,78 +211,6 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/deploy/prepare-deployment - Synchronous deploy (signed with the user's wallet)
-router.post('/prepare-deployment', authenticate, async (req: Request, res: Response) => {
-  try {
-    const { projectId, wasmBase64 } = req.body;
-    const user = req.user!;
-
-    if (!projectId || !wasmBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required parameters: projectId and wasmBase64'
-      });
-    }
-
-    // Deploy contract directly, signing with this user's wallet.
-    const deploymentResult = await deploymentService.deployContract(
-      projectId,
-      wasmBase64,
-      NETWORK,
-      user.id
-    );
-
-    // Record deployment + update project if successful and projectId is a real project.
-    if (deploymentResult.success && deploymentResult.contractAddress) {
-      try {
-        const project = await prisma.project.findUnique({
-          where: { id: projectId },
-          select: { id: true }
-        });
-        if (project) {
-          await prisma.project.update({
-            where: { id: projectId },
-            data: {
-              lastDeployed: new Date(),
-              contractAddress: deploymentResult.contractAddress,
-              deployments: {
-                create: {
-                  userId: user.id,
-                  contractAddress: deploymentResult.contractAddress,
-                  deployerPublicKey: deploymentResult.walletAddress,
-                  network: NETWORK,
-                  status: 'success',
-                  logs: (deploymentResult.logs || []).map((l) => l.message)
-                }
-              }
-            }
-          });
-        }
-      } catch (updateError: any) {
-        console.warn('Could not update project:', updateError.message);
-      }
-    }
-
-    res.json({
-      success: deploymentResult.success,
-      contractAddress: deploymentResult.contractAddress,
-      network: deploymentResult.network,
-      projectId: deploymentResult.projectId,
-      walletAddress: deploymentResult.walletAddress,
-      logs: deploymentResult.logs,
-      deployed: deploymentResult.success,
-      isMock: deploymentResult.isMock || false
-    });
-  } catch (error: any) {
-    console.error('Deployment preparation error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Deployment preparation failed',
-      message: error.message
-    });
-  }
-});
-
 // POST /api/deploy/invoke - Invoke a contract function (read-only simulation)
 router.post('/invoke', authenticate, async (req: Request, res: Response) => {
   try {
@@ -322,7 +270,7 @@ router.get('/network-info', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 // POST /api/deploy/prepare — build + simulate, return the unsigned XDR + fee.
-router.post('/prepare', authenticate, async (req: Request, res: Response) => {
+router.post('/prepare', authenticate, deployLimiter, async (req: Request, res: Response) => {
   try {
     const { projectId, wasmBase64, sourcePk, step = 'upload', wasmHashHex } = req.body;
     const network = coerceNetwork(req.body.network);
@@ -350,7 +298,7 @@ router.post('/prepare', authenticate, async (req: Request, res: Response) => {
 });
 
 // POST /api/deploy/submit — submit a wallet-signed XDR; on create, record it.
-router.post('/submit', authenticate, async (req: Request, res: Response) => {
+router.post('/submit', authenticate, deployLimiter, async (req: Request, res: Response) => {
   try {
     const { projectId, signedXdr, step = 'upload', sourcePk, wasmBase64, deployTarget } = req.body;
     const network = coerceNetwork(req.body.network);
@@ -391,7 +339,7 @@ router.post('/submit', authenticate, async (req: Request, res: Response) => {
 // CUSTODIAL deploy on mainnet — explicit opt-in, confirmation-gated, real XLM.
 // (Testnet custodial keeps using the queue path above.)
 // ---------------------------------------------------------------------------
-router.post('/custodial', authenticate, async (req: Request, res: Response) => {
+router.post('/custodial', authenticate, deployLimiter, async (req: Request, res: Response) => {
   try {
     const { projectId, wasmBase64, confirm } = req.body;
     const network = coerceNetwork(req.body.network);
@@ -418,19 +366,31 @@ router.post('/custodial', authenticate, async (req: Request, res: Response) => {
     const canDeploy = await userService.canDeploy(user);
     if (!canDeploy.allowed) return res.status(403).json({ success: false, error: canDeploy.reason, upgradeRequired: true });
 
-    // Sign with the user's decrypted key via the SDK (in-memory, no Stellar CLI —
-    // the API container doesn't ship the CLI; the SDK runs here directly).
+    // Make sure the custodial wallet exists (the worker signs with it via the
+    // user's decrypted key). Enqueue the deploy so the long two-transaction flow
+    // runs in the worker (which has the Stellar CLI) instead of blocking the API
+    // request — same queue + polling model as a testnet deploy.
     await walletService.getOrCreateWallet(user.id);
-    const keypair = await walletService.loadKeypair(user.id);
-    const r = await stellarService.deployCustodial(network, keypair, wasmBase64);
 
-    await recordDeployment({
-      projectId, userId: user.id, network, contractAddress: r.contractId,
-      deployerPublicKey: keypair.publicKey(), wasmBase64, deployTarget: project.deployTarget,
+    const jobId = crypto.randomUUID();
+    const bullJob = await addDeployJob({
+      projectId, wasmBase64, network, jobId, userId: user.id, deployTarget: project.deployTarget,
     });
-    res.json({
-      success: true, contractAddress: r.contractId, txHash: r.txHash, network,
-      explorer: explorerContract(network, r.contractId),
+    if (!bullJob || !bullJob.id) throw new Error('Failed to create BullMQ job');
+
+    const job = await prisma.job.create({
+      data: { id: jobId, type: 'deploy', status: 'queued', userId: user.id, projectId, bullJobId: bullJob.id || `deploy-${jobId}` },
+    });
+    await prisma.usageLog.create({
+      data: { userId: user.id, action: 'deploy', projectId, success: false, metadata: { network, jobId } },
+    });
+
+    res.status(202).json({
+      success: true,
+      jobId: job.id,
+      network,
+      message: 'Deployment job queued',
+      logs: [{ type: 'info', message: `Queued ${getNetwork(network).label} deployment…`, timestamp: new Date().toISOString() }],
     });
   } catch (error: any) {
     console.error('[Deploy] custodial error:', error.message);

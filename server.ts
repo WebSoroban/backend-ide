@@ -23,6 +23,10 @@ import contractsRoutes from './routes/contracts';
 import walletRoutes from './routes/wallet';
 import userTemplatesRoutes from './routes/userTemplates';
 import aiRoutes from './routes/ai';
+import { initObservability, captureError, logger } from './lib/observability';
+
+// Initialize error monitoring (Sentry if SENTRY_DSN + @sentry/node present).
+initObservability();
 
 // Boot marker — if this prints, all module imports (incl. the Stellar CLI check
 // in deploymentService) resolved without hanging.
@@ -172,8 +176,14 @@ io.on('connection', (socket) => {
 
 // Error handling middleware (must be after routes)
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  console.error('[Error]', err);
-  res.status(err.status || 500).json({
+  const status = err.status || 500;
+  // Capture server errors (5xx) to the monitor; 4xx are client faults, just log.
+  if (status >= 500) {
+    captureError(err, { path: req.path, method: req.method, userId: (req as any).userId });
+  } else {
+    logger.warn(err.message || 'request error', { path: req.path, method: req.method, status });
+  }
+  res.status(status).json({
     success: false,
     error: err.message || 'Internal server error'
   });
@@ -205,4 +215,13 @@ server.listen(PORT, '0.0.0.0', () => {
   // Verify Socket.IO is working
   console.log(`Socket.IO namespace: ${(io as any).name}`);
   console.log(`Socket.IO engine: ${(io.engine as any)?.constructor?.name || 'unknown'}`);
+});
+
+// Last-resort process guards so a stray async error is captured (and reported to
+// the monitor) instead of crashing silently or taking the process down.
+process.on('unhandledRejection', (reason) => {
+  captureError(reason, { scope: 'unhandledRejection' });
+});
+process.on('uncaughtException', (err) => {
+  captureError(err, { scope: 'uncaughtException' });
 });

@@ -163,6 +163,17 @@ export async function getSpecForContract(contractId: string): Promise<ParsedSpec
   const stored = project?.spec as unknown as ParsedSpec | null;
   if (stored && Array.isArray(stored.entries) && stored.entries.length > 0) return stored;
 
+  // Per-network fallback: the project's `contractAddress` pointer only holds the
+  // latest deploy, so a mainnet contract's spec can live on its Deployment row
+  // after a later testnet deploy. Resolve it from there before any chain fetch.
+  const dep = await prisma.deployment.findFirst({
+    where: { contractAddress: contractId },
+    select: { spec: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  const depSpec = dep?.spec as unknown as ParsedSpec | null;
+  if (depSpec && Array.isArray(depSpec.entries) && depSpec.entries.length > 0) return depSpec;
+
   // Fallback: pull WASM from chain and parse, then cache it on the project.
   const fetched = await fetchSpecFromChain(contractId);
   if (fetched && fetched.entries.length > 0) {
