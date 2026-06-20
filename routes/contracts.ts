@@ -1,8 +1,10 @@
 import express, { type Request, type Response } from 'express';
 import prisma from '../lib/prisma';
 import { authenticate, optionalAuth } from '../middleware/auth';
-import invokeService, { getSpecForContract } from '../services/invokeService';
+import invokeService, { getSpecForContract, prepareInvoke, submitInvoke } from '../services/invokeService';
 import userService from '../services/userService';
+import walletService from '../services/wallet';
+import { coerceNetwork, getNetwork } from '../lib/networks';
 
 const router = express.Router();
 
@@ -36,10 +38,12 @@ router.get('/:contractId/spec', optionalAuth, async (req: Request, res: Response
 router.post('/:contractId/invoke', authenticate, async (req: Request, res: Response) => {
   try {
     const { contractId } = req.params;
-    const { functionName, args = {}, execute = false, clientRef = null } = req.body;
+    const { functionName, args = {}, execute = false, clientRef = null, sourcePk = null } = req.body;
+    const network = coerceNetwork(req.body.network);
     if (!functionName) {
       return res.status(400).json({ success: false, error: 'Missing required parameter: functionName' });
     }
+    const safeArgs = typeof args === 'object' && !Array.isArray(args) ? args : {};
 
     // Best-effort: associate with the user's project that owns this contract.
     const project = await prisma.project.findFirst({
@@ -47,20 +51,73 @@ router.post('/:contractId/invoke', authenticate, async (req: Request, res: Respo
       select: { id: true },
     });
 
+    // Decide the signing path for a state-changing call:
+    //   mainnet + "connected" → return the unsigned XDR for the browser wallet.
+    //   testnet, or mainnet + "custodial" → backend signs in-memory.
+    if (execute && network === 'mainnet') {
+      const mode = await walletService.getMainnetSigningMode(req.userId!);
+      if (mode === 'connected') {
+        if (!sourcePk) {
+          return res.status(400).json({ success: false, error: 'Connect a wallet to sign mainnet transactions.', code: 'WALLET_REQUIRED' });
+        }
+        const prep = await prepareInvoke({
+          contractId, functionName, args: safeArgs, sourcePk, network,
+          userId: req.userId!, projectId: project?.id ?? null,
+        });
+        if (prep.readOnly) {
+          return res.json({ success: true, readOnly: true, status: 'simulated', result: prep.result, returnValue: prep.result, resourceFee: prep.resourceFee, network });
+        }
+        return res.json({
+          success: true, needsSignature: true, readOnly: false, status: 'simulated',
+          xdr: prep.xdr, feeXlm: prep.feeXlm, feeStroops: prep.feeStroops, resourceFee: prep.resourceFee,
+          passphrase: getNetwork(network).passphrase, network, result: prep.result,
+        });
+      }
+    }
+
     const result = await invokeService.invoke({
       contractId,
       functionName,
-      args: typeof args === 'object' && !Array.isArray(args) ? args : {},
+      args: safeArgs,
       userId: req.userId!,
       projectId: project?.id ?? null,
+      network,
       execute: Boolean(execute),
       clientRef,
     });
 
-    res.json(result);
+    res.json({ ...result, network });
   } catch (error: any) {
     console.error('[Contracts] Invoke error:', error);
     res.status(400).json({ success: false, error: error.message || 'Contract invocation failed' });
+  }
+});
+
+/**
+ * POST /api/contracts/:contractId/invoke/submit
+ * Submit a wallet-signed XDR for a non-custodial (mainnet) write. Body:
+ * { functionName, args, signedXdr, network, clientRef? }.
+ */
+router.post('/:contractId/invoke/submit', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { contractId } = req.params;
+    const { functionName, args = {}, signedXdr, clientRef = null } = req.body;
+    const network = coerceNetwork(req.body.network);
+    if (!functionName || !signedXdr) {
+      return res.status(400).json({ success: false, error: 'functionName and signedXdr are required' });
+    }
+    const project = await prisma.project.findFirst({
+      where: { contractAddress: contractId, userId: req.userId! },
+      select: { id: true },
+    });
+    const result = await submitInvoke({
+      contractId, functionName, args: typeof args === 'object' && !Array.isArray(args) ? args : {},
+      signedXdr, network, userId: req.userId!, projectId: project?.id ?? null, clientRef,
+    });
+    res.json({ ...result, network });
+  } catch (error: any) {
+    console.error('[Contracts] Invoke submit error:', error);
+    res.status(400).json({ success: false, error: error.message || 'Submit failed' });
   }
 });
 

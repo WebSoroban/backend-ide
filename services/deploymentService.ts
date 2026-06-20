@@ -8,12 +8,9 @@ import walletService from './wallet';
 import * as StellarSdk from '@stellar/stellar-sdk';
 import type { LogEntry } from './compilationService';
 import { parseSpecFromWasm } from './contractSpec';
+import { getNetwork, coerceNetwork, type NetworkId } from '../lib/networks';
 
 const execAsync = util.promisify(exec);
-
-// TESTNET ONLY — hardcoded. There is intentionally no mainnet code path.
-const TESTNET_RPC = 'https://soroban-testnet.stellar.org';
-const TESTNET_PASSPHRASE = StellarSdk.Networks.TESTNET;
 
 type LogFn = (type: string, message: string) => void;
 type LogUpdateCallback = (logs: LogEntry[]) => Promise<any>;
@@ -32,13 +29,18 @@ export interface DeploymentResult {
 /**
  * Environment for the Stellar CLI. The signing secret is passed via the
  * STELLAR_ACCOUNT env var (read by `--source-account`) so it never appears on
- * the command line / process list / logs. Always testnet.
+ * the command line / process list / logs. Network-parameterized — the rpc +
+ * passphrase come from the central network config. This CLI path is CUSTODIAL
+ * (the backend holds the key); it's used for testnet and for the explicit
+ * mainnet custodial opt-in only. The mainnet non-custodial default goes through
+ * stellarService (browser-signed XDR), not here.
  */
-function getStellarEnv(secret: string | null = null): NodeJS.ProcessEnv {
+function getStellarEnv(secret: string | null, network: NetworkId): NodeJS.ProcessEnv {
+  const cfg = getNetwork(network);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    STELLAR_NETWORK_PASSPHRASE: TESTNET_PASSPHRASE,
-    STELLAR_RPC_URL: process.env.SOROBAN_RPC_URL || TESTNET_RPC
+    STELLAR_NETWORK_PASSPHRASE: cfg.passphrase,
+    STELLAR_RPC_URL: cfg.rpcUrl,
   };
   if (secret) {
     // Used as the source account / signing key by `stellar contract deploy`.
@@ -115,11 +117,13 @@ class DeploymentService {
   async deployContract(
     projectId: string,
     wasmBase64: string,
-    _network: string = 'testnet',
+    networkArg: string = 'testnet',
     userId: string | null = null,
     onLogUpdate: LogUpdateCallback | null = null,
     jobId: string | null = null
   ): Promise<DeploymentResult> {
+    const network: NetworkId = coerceNetwork(networkArg);
+    const netCfg = getNetwork(network);
     const logs: LogEntry[] = [];
 
     const log: LogFn = (type, message) => {
@@ -141,7 +145,7 @@ class DeploymentService {
         throw new Error('Stellar CLI not installed');
       }
 
-      log('info', 'Starting deployment to testnet...');
+      log('info', `Starting custodial deployment to ${netCfg.label}...`);
 
       // Ensure the user has a funded testnet wallet, then load its keypair.
       await walletService.getOrCreateWallet(userId);
@@ -170,13 +174,20 @@ class DeploymentService {
 
       // Deploy. The secret is provided via STELLAR_ACCOUNT in the env only.
       log('info', 'Deploying contract...');
-      const deployEnv = getStellarEnv(secret);
+      const deployEnv = getStellarEnv(secret, network);
 
       // If the contract has a constructor, supply the deployer's own address for
       // every Address parameter (owner/recipient/admin/minter). This is what the
       // OpenZeppelin templates and the wizard's ownable contracts expect, so they
       // instantiate out of the box. Non-Address required args can't be defaulted.
-      const deployArgs = ['contract', 'deploy', '--wasm', wasmPath, '--network', 'testnet', '--alias', projectId];
+      // Use explicit --rpc-url + --network-passphrase so any network works (the
+      // passphrase is public; the secret stays in STELLAR_ACCOUNT env).
+      const deployArgs = [
+        'contract', 'deploy', '--wasm', wasmPath,
+        '--rpc-url', netCfg.rpcUrl,
+        '--network-passphrase', netCfg.passphrase,
+        '--alias', `${projectId}-${network}`,
+      ];
       try {
         const ctor = parseSpecFromWasm(wasmBuffer).functions.find((f) => f.name === '__constructor');
         if (ctor && ctor.inputs.length) {
@@ -257,7 +268,7 @@ class DeploymentService {
         success: true,
         logs,
         contractAddress: contractId,
-        network: 'testnet',
+        network,
         projectId,
         walletAddress: publicKey
       };
@@ -284,8 +295,10 @@ class DeploymentService {
     functionName: string,
     args: any[] = [],
     _sourceAccount: string | null = null,
-    _network: string = 'testnet'
+    networkArg: string = 'testnet'
   ): Promise<any> {
+    const network = coerceNetwork(networkArg);
+    const netCfg = getNetwork(network);
     const logs: LogEntry[] = [];
 
     const log: LogFn = (type, message) => {
@@ -303,8 +316,8 @@ class DeploymentService {
         throw new Error('Soroban RPC not available in SDK');
       }
 
-      const server = new SorobanRpc.Server(TESTNET_RPC);
-      log('info', `Using Soroban RPC: ${TESTNET_RPC}`);
+      const server = new SorobanRpc.Server(netCfg.rpcUrl, { allowHttp: netCfg.rpcUrl.startsWith('http://') });
+      log('info', `Using Soroban RPC: ${netCfg.rpcUrl}`);
 
       // Ephemeral keypair for read-only simulation.
       const keypair = StellarSdk.Keypair.random();
@@ -337,7 +350,7 @@ class DeploymentService {
 
       const transaction = new StellarSdk.TransactionBuilder(account, {
         fee: StellarSdk.BASE_FEE,
-        networkPassphrase: TESTNET_PASSPHRASE
+        networkPassphrase: netCfg.passphrase
       })
         .addOperation(contract.call(functionName, ...scValArgs))
         .setTimeout(30)

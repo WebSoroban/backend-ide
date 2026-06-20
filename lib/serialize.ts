@@ -41,6 +41,8 @@ export function serializeProject(project: any): any {
         _id: d.id,
         timestamp: d.createdAt,
         contractAddress: d.contractAddress,
+        network: d.network || 'testnet',
+        deployerPublicKey: d.deployerPublicKey,
         status: d.status,
         logs: d.logs || []
       }))
@@ -53,6 +55,7 @@ export function serializeProject(project: any): any {
     userId: project.userId,
     files,
     contractAddress: project.contractAddress,
+    network: project.network || 'testnet',
     lastDeployed: project.lastDeployed,
     isLocal: project.isLocal,
     manifestPath: project.manifestPath,

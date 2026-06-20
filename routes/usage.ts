@@ -93,6 +93,8 @@ router.get('/summary', async (req: Request, res: Response) => {
     });
 
     const totals: Record<string, number> = { compile: 0, deploy: 0, function_test: 0 };
+    // Deploys split by network (network lives in the log's metadata; default testnet).
+    const deployByNetwork: Record<string, number> = { testnet: 0, mainnet: 0 };
     const dailyMap = new Map<string, any>();
     const uniqueUsers = new Set<string>();
 
@@ -101,6 +103,10 @@ router.get('/summary', async (req: Request, res: Response) => {
 
       const action = log.action;
       if (totals[action] !== undefined) totals[action] += 1;
+      if (action === 'deploy') {
+        const net = (log.metadata && (log.metadata as any).network) === 'mainnet' ? 'mainnet' : 'testnet';
+        deployByNetwork[net] += 1;
+      }
       if (log.userId) uniqueUsers.add(String(log.userId));
 
       const dateKey = log.createdAt.toISOString().slice(0, 10);
@@ -119,6 +125,7 @@ router.get('/summary', async (req: Request, res: Response) => {
         totalEvents: logs.length,
         uniqueUsers: uniqueUsers.size,
         totals,
+        deployByNetwork,
         periodStart: thirtyDaysAgo.toISOString(),
         periodEnd: new Date().toISOString()
       },
@@ -153,6 +160,9 @@ router.get('/activity', async (req: Request, res: Response) => {
       projectId: log.projectId,
       contractAddress: log.contractAddress,
       functionName: log.functionName,
+      // Network is recorded in metadata by the deploy/invoke paths; default to
+      // testnet for older rows + network-agnostic actions (compile).
+      network: (log.metadata && (log.metadata as any).network) || 'testnet',
       success: log.success,
       error: log.error,
       createdAt: log.createdAt,

@@ -17,9 +17,7 @@ import prisma from '../lib/prisma';
 import walletService from './wallet';
 import socketService from './socketService';
 import { buildSpec, parseSpecFromWasmBase64, fetchSpecFromChain, type ParsedSpec } from './contractSpec';
-
-const TESTNET_RPC = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
-const TESTNET_PASSPHRASE = StellarSdk.Networks.TESTNET;
+import { getNetwork, coerceNetwork, type NetworkId } from '../lib/networks';
 
 const rpc: any = (StellarSdk as any).rpc;
 const xdr: any = (StellarSdk as any).xdr;
@@ -29,8 +27,9 @@ const Account: any = (StellarSdk as any).Account;
 const BASE_FEE: string = (StellarSdk as any).BASE_FEE;
 const scValToNative: any = (StellarSdk as any).scValToNative;
 
-function getServer() {
-  return new rpc.Server(TESTNET_RPC, { allowHttp: false });
+function getServer(network: NetworkId = 'testnet') {
+  const cfg = getNetwork(network);
+  return new rpc.Server(cfg.rpcUrl, { allowHttp: cfg.rpcUrl.startsWith('http://') });
 }
 
 export interface InvokeRequest {
@@ -39,6 +38,8 @@ export interface InvokeRequest {
   args: Record<string, any>;
   userId?: string | null;
   projectId?: string | null;
+  /** Network to run on (testnet | mainnet). Defaults to testnet. */
+  network?: NetworkId;
   /** When true, a state-changing call is signed + submitted (otherwise simulated). */
   execute?: boolean;
   /** Socket room id for live status (submitted -> pending -> confirmed/failed). */
@@ -118,6 +119,38 @@ function cacheSpec(contractId: string, spec: ParsedSpec, specObj: any) {
 
 export function invalidateSpecCache(contractId: string) {
   specCache.delete(contractId);
+}
+
+/**
+ * Resolve { spec, specObj } for a contract (cached). Falls back to the on-chain
+ * WASM when the stored entries can't be decoded.
+ */
+async function resolveSpec(contractId: string): Promise<{ spec: ParsedSpec; specObj: any }> {
+  const cached = specCache.get(contractId);
+  if (cached) return cached;
+
+  const resolved = await getSpecForContract(contractId);
+  if (!resolved) {
+    throw new Error('Contract spec unavailable. Recompile the contract to enable typed invoke.');
+  }
+  let spec = resolved;
+  let specObj: any;
+  try {
+    specObj = buildSpec(spec.entries);
+  } catch (err: any) {
+    const fresh = await fetchSpecFromChain(contractId);
+    if (!fresh || fresh.entries.length === 0) {
+      throw new Error(`Could not decode the contract interface (${err.message}). Recompile and redeploy the contract.`);
+    }
+    try {
+      specObj = buildSpec(fresh.entries);
+    } catch (err2: any) {
+      throw new Error(`Could not decode the contract interface: ${err2.message}`);
+    }
+    spec = fresh;
+  }
+  cacheSpec(contractId, spec, specObj);
+  return { spec, specObj };
 }
 
 /** Resolve the parsed spec for a contract: stored on Project, else from chain. */
@@ -252,44 +285,14 @@ function decodeEvents(getRes: any): any[] {
  */
 export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
   const { contractId, functionName, args = {}, userId = null, projectId = null, execute = false, clientRef = null } = req;
+  const network = coerceNetwork(req.network);
+  const passphrase = getNetwork(network).passphrase;
 
   const emit = (status: string, extra: any = {}) => {
     if (clientRef) socketService.emitJobStatus(clientRef, status, { contractId, functionName, ...extra });
   };
 
-  // Resolve the spec once and reuse it for subsequent invokes of this contract.
-  let spec: ParsedSpec;
-  let specObj: any;
-  const cached = specCache.get(contractId);
-  if (cached) {
-    ({ spec, specObj } = cached);
-  } else {
-    const resolved = await getSpecForContract(contractId);
-    if (!resolved) {
-      throw new Error('Contract spec unavailable. Recompile the contract to enable typed invoke.');
-    }
-    spec = resolved;
-    // Rebuild a contract.Spec from the stored entries. If they can't be decoded
-    // (e.g. truncated/older format -> "Bad union switch"), pull a fresh spec
-    // straight from the on-chain WASM and use that instead.
-    try {
-      specObj = buildSpec(spec.entries);
-    } catch (err: any) {
-      const fresh = await fetchSpecFromChain(contractId);
-      if (!fresh || fresh.entries.length === 0) {
-        throw new Error(
-          `Could not decode the contract interface (${err.message}). Recompile and redeploy the contract.`,
-        );
-      }
-      try {
-        specObj = buildSpec(fresh.entries);
-      } catch (err2: any) {
-        throw new Error(`Could not decode the contract interface: ${err2.message}`);
-      }
-      spec = fresh;
-    }
-    cacheSpec(contractId, spec, specObj);
-  }
+  const { spec, specObj } = await resolveSpec(contractId);
 
   const coerced = coerceArgs(spec, functionName, args);
 
@@ -301,7 +304,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
     throw new Error(`Invalid arguments for ${functionName}: ${err.message}`);
   }
 
-  const server = getServer();
+  const server = getServer(network);
   const contract = new Contract(contractId);
 
   // Source account: the user's wallet if we have one, else an unfunded stub
@@ -320,7 +323,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
     account = new Account(sourcePk, '0');
   }
 
-  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: TESTNET_PASSPHRASE })
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: passphrase })
     .addOperation(contract.call(functionName, ...scVals))
     .setTimeout(180)
     .build();
@@ -334,7 +337,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
   }
   if (rpc.Api.isSimulationError(sim)) {
     const invocation = await persistInvocation({
-      contractId, userId, projectId, functionName, args, status: 'failed', readOnly: true, error: sim.error,
+      contractId, network, userId, projectId, functionName, args, status: 'failed', readOnly: true, error: sim.error,
     });
     return {
       success: false, readOnly: true, status: 'failed',
@@ -366,7 +369,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
   // Read-only, or a write the caller only wanted to preview -> stop after sim.
   if (readOnly || !execute) {
     const invocation = await persistInvocation({
-      contractId, userId, projectId, functionName, args,
+      contractId, network, userId, projectId, functionName, args,
       status: 'simulated', readOnly, returnValue: decoded, resourceFee,
     });
     return {
@@ -388,7 +391,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
   if (sendRes.status === 'ERROR') {
     const raw = safeXdrToString(sendRes.errorResult);
     const invocation = await persistInvocation({
-      contractId, userId, projectId, functionName, args, status: 'failed', readOnly: false, txHash, error: raw,
+      contractId, network, userId, projectId, functionName, args, status: 'failed', readOnly: false, txHash, error: raw,
     });
     emit('failed', { txHash, error: humanizeError(raw) });
     return { success: false, readOnly: false, status: 'failed', txHash, error: humanizeError(raw), resourceFee, invocationId: invocation?.id };
@@ -408,7 +411,7 @@ export async function invoke(req: InvokeRequest): Promise<InvokeResult> {
     }
     const events = decodeEvents(getRes);
     const invocation = await persistInvocation({
-      contractId, userId, projectId, functionName, args, status: 'success', readOnly: false, txHash, returnValue, resourceFee,
+      contractId, network, userId, projectId, functionName, args, status: 'success', readOnly: false, txHash, returnValue, resourceFee,
     });
     emit('confirmed', { txHash, returnValue });
     return {
@@ -439,6 +442,7 @@ function safeXdrToString(x: any): string {
 
 async function persistInvocation(data: {
   contractId: string;
+  network?: NetworkId;
   userId?: string | null;
   projectId?: string | null;
   functionName: string;
@@ -454,6 +458,7 @@ async function persistInvocation(data: {
     return await prisma.invocation.create({
       data: {
         contractId: data.contractId,
+        network: data.network ?? 'testnet',
         userId: data.userId ?? null,
         projectId: data.projectId ?? null,
         functionName: data.functionName,
@@ -472,4 +477,137 @@ async function persistInvocation(data: {
   }
 }
 
-export default { invoke, getSpecForContract, humanizeError, invalidateSpecCache };
+/**
+ * NON-CUSTODIAL write step 1 — build + simulate + prepare against the CONNECTED
+ * wallet's address. Read-only calls return the decoded result directly; writes
+ * return the unsigned XDR (for the browser wallet) plus the fee estimate.
+ */
+export async function prepareInvoke(req: {
+  contractId: string;
+  functionName: string;
+  args: Record<string, any>;
+  sourcePk: string;
+  network?: NetworkId;
+  userId?: string | null;
+  projectId?: string | null;
+}): Promise<{ readOnly: boolean; result?: any; xdr?: string; feeStroops?: string; feeXlm?: string; resourceFee?: string }> {
+  const network = coerceNetwork(req.network);
+  const passphrase = getNetwork(network).passphrase;
+  const { spec, specObj } = await resolveSpec(req.contractId);
+  const coerced = coerceArgs(spec, req.functionName, req.args || {});
+
+  let scVals: any[];
+  try {
+    scVals = specObj.funcArgsToScVals(req.functionName, coerced);
+  } catch (err: any) {
+    throw new Error(`Invalid arguments for ${req.functionName}: ${err.message}`);
+  }
+
+  const server = getServer(network);
+  const contract = new Contract(req.contractId);
+  let account: any;
+  try {
+    account = await server.getAccount(req.sourcePk);
+  } catch {
+    throw new Error(`Account ${req.sourcePk} is not funded on ${getNetwork(network).label}. Fund it before signing.`);
+  }
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: passphrase })
+    .addOperation(contract.call(req.functionName, ...scVals))
+    .setTimeout(180)
+    .build();
+
+  let sim: any;
+  try {
+    sim = await server.simulateTransaction(tx);
+  } catch (err: any) {
+    throw new Error(`Simulation failed: ${err.message}`);
+  }
+  if (rpc.Api.isSimulationError(sim)) throw new Error(humanizeError(sim.error));
+
+  let decoded: any = undefined;
+  try {
+    if (sim.result?.retval) decoded = toJsonSafe(specObj.funcResToNative(req.functionName, sim.result.retval));
+  } catch {
+    try { decoded = toJsonSafe(scValToNative(sim.result.retval)); } catch { decoded = null; }
+  }
+
+  let readOnly = true;
+  try {
+    const rw = sim.transactionData ? sim.transactionData.getReadWrite() : [];
+    const auth = sim.result?.auth || [];
+    readOnly = (rw?.length ?? 0) === 0 && (auth?.length ?? 0) === 0;
+  } catch {
+    readOnly = (sim.result?.auth?.length ?? 0) === 0;
+  }
+  const resourceFee = sim.minResourceFee ? String(sim.minResourceFee) : undefined;
+
+  if (readOnly) {
+    await persistInvocation({
+      contractId: req.contractId, network, userId: req.userId, projectId: req.projectId,
+      functionName: req.functionName, args: req.args || {}, status: 'simulated', readOnly: true,
+      returnValue: decoded, resourceFee,
+    });
+    return { readOnly: true, result: decoded, resourceFee };
+  }
+
+  const prepared = await server.prepareTransaction(tx);
+  const feeStroops = String(prepared.fee ?? BASE_FEE);
+  return {
+    readOnly: false, result: decoded, xdr: prepared.toXDR(),
+    feeStroops, feeXlm: (Number(feeStroops) / 1e7).toFixed(7), resourceFee,
+  };
+}
+
+/** NON-CUSTODIAL write step 2 — submit the wallet-signed XDR and poll. */
+export async function submitInvoke(req: {
+  contractId: string;
+  functionName: string;
+  args?: Record<string, any>;
+  signedXdr: string;
+  network?: NetworkId;
+  userId?: string | null;
+  projectId?: string | null;
+  clientRef?: string | null;
+}): Promise<InvokeResult> {
+  const network = coerceNetwork(req.network);
+  const passphrase = getNetwork(network).passphrase;
+  const { specObj } = await resolveSpec(req.contractId);
+  const server = getServer(network);
+  const emit = (status: string, extra: any = {}) => {
+    if (req.clientRef) socketService.emitJobStatus(req.clientRef, status, { contractId: req.contractId, functionName: req.functionName, ...extra });
+  };
+
+  const tx = TransactionBuilder.fromXDR(req.signedXdr, passphrase);
+  emit('submitted');
+  const sendRes: any = await server.sendTransaction(tx);
+  const txHash = sendRes.hash;
+  if (sendRes.status === 'ERROR') {
+    const raw = safeXdrToString(sendRes.errorResult);
+    const inv = await persistInvocation({ contractId: req.contractId, network, userId: req.userId, projectId: req.projectId, functionName: req.functionName, args: req.args || {}, status: 'failed', readOnly: false, txHash, error: raw });
+    emit('failed', { txHash, error: humanizeError(raw) });
+    return { success: false, readOnly: false, status: 'failed', txHash, error: humanizeError(raw), invocationId: inv?.id };
+  }
+
+  emit('pending', { txHash });
+  const getRes: any = await server.pollTransaction(txHash, { attempts: 30, sleepStrategy: () => 1000 });
+  if (getRes.status === 'SUCCESS') {
+    let returnValue: any = undefined;
+    try {
+      if (getRes.returnValue) returnValue = toJsonSafe(specObj.funcResToNative(req.functionName, getRes.returnValue));
+    } catch {
+      try { returnValue = toJsonSafe(scValToNative(getRes.returnValue)); } catch { returnValue = null; }
+    }
+    const events = decodeEvents(getRes);
+    const inv = await persistInvocation({ contractId: req.contractId, network, userId: req.userId, projectId: req.projectId, functionName: req.functionName, args: req.args || {}, status: 'success', readOnly: false, txHash, returnValue });
+    emit('confirmed', { txHash, returnValue });
+    return { success: true, readOnly: false, status: 'success', txHash, result: returnValue, returnValue, events, latestLedger: getRes.latestLedger, invocationId: inv?.id };
+  }
+
+  const raw = getRes.resultXdr ? safeXdrToString(getRes.resultXdr) : `Transaction ${getRes.status}`;
+  const inv = await persistInvocation({ contractId: req.contractId, network, userId: req.userId, projectId: req.projectId, functionName: req.functionName, args: req.args || {}, status: 'failed', readOnly: false, txHash, error: raw });
+  emit('failed', { txHash, error: humanizeError(raw) });
+  return { success: false, readOnly: false, status: 'failed', txHash, error: humanizeError(raw), invocationId: inv?.id };
+}
+
+export default { invoke, prepareInvoke, submitInvoke, getSpecForContract, humanizeError, invalidateSpecCache };

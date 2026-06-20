@@ -20,6 +20,7 @@ import compilationService from '../services/compilationService';
 import deploymentService from '../services/deploymentService';
 import userService from '../services/userService';
 import { COPILOT_MODES, type CopilotMode, type ProposedEdit } from '../services/ai/types';
+import { coerceNetwork } from '../lib/networks';
 
 const router = express.Router();
 
@@ -406,6 +407,13 @@ router.post('/runs/:id/deploy', authenticate, async (req: Request, res: Response
   try {
     if (req.body.confirm !== true) {
       return res.status(400).json({ error: 'Deployment requires explicit confirmation (confirm: true).' });
+    }
+    // The Copilot never deploys to mainnet — that always requires a human at the
+    // Deploy panel confirming the real-XLM transaction.
+    if (coerceNetwork(req.body.network) === 'mainnet') {
+      return res.status(403).json({
+        error: 'The Copilot cannot deploy to mainnet. Use the Deploy panel and confirm the mainnet transaction yourself.',
+      });
     }
     const loaded = await loadRunProject(req, res);
     if (!loaded) return;

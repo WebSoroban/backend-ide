@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     libudev-dev \
     ca-certificates \
     gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,9 +60,12 @@ COPY package*.json ./
 COPY prisma ./prisma
 
 # Install Node dependencies, including devDependencies (typescript) needed to
-# build. postinstall runs `prisma generate`.
+# build. --ignore-scripts skips package postinstall scripts (notably esbuild's
+# install.js, which intermittently fails under BuildKit with ETXTBSY); esbuild/
+# tsx are dev-only and unused in the compiled image. Prisma Client is generated
+# by `npm run build` below, so skipping postinstall is safe.
 RUN npm cache clean --force \
-    && npm install --no-optional \
+    && npm install --no-optional --ignore-scripts \
     && npm cache clean --force
 
 # Copy application files (node_modules excluded via .dockerignore)

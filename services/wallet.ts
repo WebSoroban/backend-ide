@@ -1,24 +1,29 @@
 /**
- * Per-user Stellar TESTNET wallet service.
+ * Per-user Stellar wallet service.
  *
  * Each user gets a server-managed Stellar keypair created on first login. The
  * secret key is AES-256-GCM encrypted at rest (see lib/crypto.ts) and is only
- * ever decrypted in-memory at deploy time via loadKeypair(). It is NEVER logged
- * and NEVER returned by any API response.
+ * ever decrypted in-memory — at deploy/invoke sign time via loadKeypair(), or in
+ * the single deliberate, gated, audited export path. It is NEVER logged and
+ * NEVER returned by any API response except that gated export.
  *
- * TESTNET ONLY. The network passphrase, Friendbot and Horizon endpoints are
- * hardcoded — there is intentionally no mainnet code path here.
+ * The SAME keypair is the user's address on BOTH networks; only funding and the
+ * rpc/horizon differ. Friendbot (the faucet) is TESTNET ONLY — mainnet has none.
  */
 import { Keypair } from '@stellar/stellar-sdk';
 import type { Wallet } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { encrypt, decrypt } from '../lib/crypto';
+import { getNetwork, coerceNetwork, type NetworkId } from '../lib/networks';
 
-// --- Testnet constants (hardcoded on purpose; do not parameterize for mainnet) ---
-const FRIENDBOT_URL = 'https://friendbot.stellar.org';
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-// Top up again if the balance falls below this many XLM.
+// Top up testnet again if the balance falls below this many XLM.
 const LOW_BALANCE_THRESHOLD = 10;
+
+// Back-compat exports (some callers import these directly).
+export const FRIENDBOT_URL = getNetwork('testnet').friendbotUrl!;
+export const HORIZON_URL = getNetwork('testnet').horizonUrl;
+
+export type MainnetSigningMode = 'connected' | 'custodial';
 
 /**
  * Fund a public key from the testnet Friendbot. Resolves true on success.
@@ -42,25 +47,26 @@ async function fundViaFriendbot(publicKey: string): Promise<boolean> {
 }
 
 /**
- * Get the native XLM balance for a public key from Horizon.
- * Returns a number (0 if the account is not yet funded / not found).
+ * Native XLM balance for a public key on the given network's Horizon.
+ * Returns 0 if the account is not yet funded / not found.
  */
-async function getBalance(publicKey: string): Promise<number> {
+async function getBalance(publicKey: string, network: NetworkId = 'testnet'): Promise<number> {
   try {
-    const res = await fetch(`${HORIZON_URL}/accounts/${encodeURIComponent(publicKey)}`);
+    const horizon = getNetwork(network).horizonUrl;
+    const res = await fetch(`${horizon}/accounts/${encodeURIComponent(publicKey)}`);
     if (!res.ok) return 0;
     const account: any = await res.json();
     const native = (account.balances || []).find((b: any) => b.asset_type === 'native');
     return native ? parseFloat(native.balance) : 0;
   } catch (err: any) {
-    console.warn(`[Wallet] Balance lookup failed for ${publicKey}: ${err.message}`);
+    console.warn(`[Wallet] Balance lookup failed for ${publicKey} on ${network}: ${err.message}`);
     return 0;
   }
 }
 
 /**
  * Create a brand-new wallet for a user: generate a keypair, encrypt the secret,
- * persist it, fund it via Friendbot, and mark funded. Returns the Wallet row.
+ * persist it, fund it via testnet Friendbot, and mark funded. Returns the row.
  */
 async function createWalletForUser(userId: string): Promise<Wallet> {
   const keypair = Keypair.random();
@@ -74,9 +80,7 @@ async function createWalletForUser(userId: string): Promise<Wallet> {
   });
 }
 
-/**
- * Return the user's wallet, creating (and funding) it if it doesn't exist yet.
- */
+/** Return the user's wallet, creating (and testnet-funding) it if missing. */
 async function getOrCreateWallet(userId: string): Promise<Wallet> {
   const existing = await prisma.wallet.findUnique({ where: { userId } });
   if (existing) {
@@ -92,9 +96,7 @@ async function getOrCreateWallet(userId: string): Promise<Wallet> {
   return createWalletForUser(userId);
 }
 
-/**
- * Return only the public key (G...) for a user's wallet, or null if none.
- */
+/** Return only the public key (G...) for a user's wallet, or null if none. */
 async function getPublicKey(userId: string): Promise<string | null> {
   const wallet = await prisma.wallet.findUnique({
     where: { userId },
@@ -104,44 +106,80 @@ async function getPublicKey(userId: string): Promise<string | null> {
 }
 
 /**
- * Re-run Friendbot if the wallet balance is low (testnet top-up).
+ * Re-run Friendbot if the wallet balance is low (TESTNET top-up only).
  * Returns { funded, balance }.
  */
 async function topUpIfLow(userId: string): Promise<{ funded: boolean; balance: number }> {
   const wallet = await getOrCreateWallet(userId);
-  const balance = await getBalance(wallet.publicKey);
+  const balance = await getBalance(wallet.publicKey, 'testnet');
   if (balance < LOW_BALANCE_THRESHOLD) {
     const ok = await fundViaFriendbot(wallet.publicKey);
     if (ok && !wallet.funded) {
       await prisma.wallet.update({ where: { userId }, data: { funded: true } });
     }
-    return { funded: true, balance: await getBalance(wallet.publicKey) };
+    return { funded: true, balance: await getBalance(wallet.publicKey, 'testnet') };
   }
   return { funded: wallet.funded, balance };
 }
 
 /**
  * INTERNAL ONLY — decrypt the secret and return a Stellar Keypair for signing.
- * Must never be exposed through any route response.
+ * Must never be exposed through any route response (the gated export goes through
+ * exportSecret + an audit log instead).
  */
 async function loadKeypair(userId: string): Promise<Keypair> {
   const wallet = await prisma.wallet.findUnique({ where: { userId } });
-  if (!wallet) {
-    throw new Error('No wallet found for user');
-  }
+  if (!wallet) throw new Error('No wallet found for user');
   const secret = decrypt(wallet.secretKeyEncrypted);
   return Keypair.fromSecret(secret);
 }
 
 /**
- * Public-safe view of a wallet: { publicKey, funded, balance }. Never the secret.
+ * Public-safe wallet view for a network: { publicKey, balance, network, funded }.
+ * On mainnet `funded` means "has a positive balance" (there is no faucet).
  */
 async function getPublicWalletInfo(
-  userId: string
-): Promise<{ publicKey: string; funded: boolean; balance: number }> {
+  userId: string,
+  network: NetworkId = 'testnet'
+): Promise<{ publicKey: string; funded: boolean; balance: number; network: NetworkId; mainnetSigningMode: MainnetSigningMode }> {
   const wallet = await getOrCreateWallet(userId);
-  const balance = await getBalance(wallet.publicKey);
-  return { publicKey: wallet.publicKey, funded: wallet.funded, balance };
+  const balance = await getBalance(wallet.publicKey, network);
+  const funded = network === 'mainnet' ? balance > 0 : wallet.funded;
+  return {
+    publicKey: wallet.publicKey,
+    funded,
+    balance,
+    network,
+    mainnetSigningMode: (wallet.mainnetSigningMode as MainnetSigningMode) || 'connected',
+  };
+}
+
+/** Read the user's mainnet signing mode (default "connected" = non-custodial). */
+async function getMainnetSigningMode(userId: string): Promise<MainnetSigningMode> {
+  const wallet = await prisma.wallet.findUnique({ where: { userId }, select: { mainnetSigningMode: true } });
+  return (wallet?.mainnetSigningMode as MainnetSigningMode) || 'connected';
+}
+
+/** Persist the user's mainnet signing mode. Custodial requires explicit opt-in. */
+async function setMainnetSigningMode(userId: string, mode: MainnetSigningMode): Promise<MainnetSigningMode> {
+  await getOrCreateWallet(userId);
+  const updated = await prisma.wallet.update({
+    where: { userId },
+    data: { mainnetSigningMode: mode },
+    select: { mainnetSigningMode: true },
+  });
+  return updated.mainnetSigningMode as MainnetSigningMode;
+}
+
+/**
+ * GATED export — decrypt and return the secret ONCE. The caller MUST have already
+ * performed the re-auth/confirmation checks and MUST write a KeyExportAudit row.
+ * The secret is held in memory only and is never logged here.
+ */
+async function exportSecret(userId: string): Promise<{ publicKey: string; secret: string }> {
+  const wallet = await prisma.wallet.findUnique({ where: { userId } });
+  if (!wallet) throw new Error('No wallet found for user');
+  return { publicKey: wallet.publicKey, secret: decrypt(wallet.secretKeyEncrypted) };
 }
 
 export {
@@ -153,8 +191,9 @@ export {
   topUpIfLow,
   fundViaFriendbot,
   loadKeypair,
-  HORIZON_URL,
-  FRIENDBOT_URL
+  getMainnetSigningMode,
+  setMainnetSigningMode,
+  exportSecret,
 };
 
 export default {
@@ -166,6 +205,9 @@ export default {
   topUpIfLow,
   fundViaFriendbot,
   loadKeypair,
+  getMainnetSigningMode,
+  setMainnetSigningMode,
+  exportSecret,
   HORIZON_URL,
-  FRIENDBOT_URL
+  FRIENDBOT_URL,
 };

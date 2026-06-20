@@ -59,6 +59,7 @@ model User {
   agentRuns         AgentRun[]
   plans             Plan[]
   aiSetting         AiSetting?
+  keyExports        KeyExportAudit[]
 
   @@index([authMethod])
 }
@@ -73,10 +74,31 @@ model Wallet {
   publicKey          String
   secretKeyEncrypted String
   funded             Boolean  @default(false)
+  // How mainnet transactions are signed for this user's generated wallet:
+  //   "connected" — non-custodial (default): the browser wallet signs.
+  //   "custodial" — explicit opt-in: the backend signs with the stored key.
+  // Testnet always uses the custodial generated wallet.
+  mainnetSigningMode String   @default("connected")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// KeyExportAudit — one row per gated private-key reveal/export. Never stores the
+// key itself; just who exported it, when, and from where (for incident response).
+// ---------------------------------------------------------------------------
+model KeyExportAudit {
+  id        String   @id @default(cuid())
+  userId    String
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +108,11 @@ model Project {
   id              String    @id @default(cuid())
   name            String    @default("Untitled Project")
   userId          String
+  // The contract address + spec below reflect the MOST RECENT deploy. The
+  // network it was deployed to is recorded here; per-network history lives in
+  // Deployment rows (a contract on testnet is distinct from one on mainnet).
   contractAddress String?
+  network         String    @default("testnet")
   lastDeployed    DateTime?
   isLocal         Boolean   @default(false)
   // Multi-file build configuration.
@@ -173,6 +199,7 @@ model Invocation {
   userId       String?
   projectId    String?
   functionName String
+  network      String   @default("testnet")
   args         Json     @default("{}")
   status       String   @default("pending") // simulated | submitted | success | failed
   readOnly     Boolean  @default(false)
