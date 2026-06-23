@@ -24,7 +24,7 @@ export const CREDITS_PER_USD = numEnv('CREDITS_PER_USD', 100);
 export const CREDIT_MARGIN = numEnv('CREDIT_MARGIN', 1);
 
 /** New users get this many free credits, once (idempotent signup grant). */
-export const SIGNUP_GRANT_CREDITS = Math.max(0, Math.floor(numEnv('SIGNUP_GRANT_CREDITS', 10)));
+export const SIGNUP_GRANT_CREDITS = Math.max(0, Math.floor(numEnv('SIGNUP_GRANT_CREDITS', 50)));
 
 // ---------------------------------------------------------------------------
 // Payment methods. Dodo exposes `crypto_currency` for crypto/stablecoin checkout

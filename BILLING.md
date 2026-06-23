@@ -1,6 +1,6 @@
 # WebSoroban AI Credits (Dodo Payments)
 
-Credit-based billing for the AI Copilot. New users get **10 free credits**; each
+Credit-based billing for the AI Copilot. New users get **50 free credits**; each
 Copilot run consumes credits based on the **actual model cost** OpenRouter reports;
 when a user runs out they buy a **one-time credit pack** via Dodo Payments.
 
@@ -19,7 +19,7 @@ read-modify-write race).
 
 | reason | delta | refId (idempotency key) |
 |--------|-------|--------------------------|
-| `signup_grant` | +10 | `"signup"` |
+| `signup_grant` | +50 | `"signup"` |
 | `purchase` | + pack credits | Dodo `payment_id` |
 | `usage` | − credits charged | `AgentRun.id` |
 | `refund` / `admin` | ± | free-form / null |
@@ -179,7 +179,7 @@ Point the Dodo dashboard webhook at `https://<api-host>/api/webhooks/dodo`.
 - **Out-of-credits** — a gated run (402) opens the upgrade modal
   (`components/billing/upgrade-modal.tsx`) with the 3 packs → Buy → Dodo checkout.
 - **`/billing` page** — balance, totals, the 3 packs, full credit ledger, recent AI
-  usage, and the 10-free-credits onboarding note.
+  usage, and the 50-free-credits onboarding note.
 
 ---
 
