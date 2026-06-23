@@ -149,6 +149,71 @@ router.get('/summary', authenticate, requireAdmin, async (req: Request, res: Res
 });
 
 /**
+ * GET /api/usage/billing  (admin only)
+ * Platform-wide AI credit + billing metrics: credits granted/purchased/spent
+ * (from the CreditLedger), the outstanding credit liability (sum of balances),
+ * and our actual model spend + credits charged (from AiUsage). Lets us see
+ * revenue proxy (credits purchased) vs cost (OpenRouter USD) at a glance.
+ */
+router.get('/billing', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const [ledgerByReason, usageAgg, userAgg, last30] = await Promise.all([
+      prisma.creditLedger.groupBy({ by: ['reason'], _sum: { delta: true }, _count: { _all: true } }),
+      prisma.aiUsage.aggregate({
+        _sum: { costUsd: true, creditsCharged: true, tokensIn: true, tokensOut: true },
+        _count: { _all: true },
+      }),
+      prisma.user.aggregate({ _sum: { credits: true }, _count: { _all: true } }),
+      prisma.aiUsage.aggregate({
+        where: { createdAt: { gte: thirtyDaysAgo } },
+        _sum: { costUsd: true, creditsCharged: true },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const byReason: Record<string, { delta: number; count: number }> = {};
+    for (const r of ledgerByReason) {
+      byReason[r.reason] = { delta: r._sum.delta || 0, count: r._count._all };
+    }
+
+    res.json({
+      success: true,
+      billing: {
+        // Credits (our DB is the source of truth).
+        granted: byReason.signup_grant?.delta || 0, // free signup credits
+        purchased: byReason.purchase?.delta || 0, // bought via Dodo (revenue proxy)
+        purchaseCount: byReason.purchase?.count || 0,
+        spent: Math.abs(byReason.usage?.delta || 0), // consumed by runs
+        refunded: Math.abs(byReason.refund?.delta || 0),
+        adminAdjust: byReason.admin?.delta || 0,
+        outstandingCredits: userAgg._sum.credits || 0, // liability across all users
+        totalUsers: userAgg._count._all,
+        // Actual model usage (cost is what we pay OpenRouter).
+        ai: {
+          runs: usageAgg._count._all,
+          creditsCharged: usageAgg._sum.creditsCharged || 0,
+          costUsd: usageAgg._sum.costUsd || 0,
+          tokensIn: usageAgg._sum.tokensIn || 0,
+          tokensOut: usageAgg._sum.tokensOut || 0,
+        },
+        last30d: {
+          runs: last30._count._all,
+          creditsCharged: last30._sum.creditsCharged || 0,
+          costUsd: last30._sum.costUsd || 0,
+        },
+        periodEnd: new Date().toISOString(),
+      },
+    });
+  } catch (error: any) {
+    console.error('Get billing summary error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get billing summary', message: error.message });
+  }
+});
+
+/**
  * GET /api/usage/activity
  * Get recent activity logs for all users (platform-wide for analytics)
  */
@@ -213,6 +278,7 @@ router.get('/users', authenticate, requireAdmin, async (req: Request, res: Respo
           picture: true,
           authMethod: true,
           subscription: true,
+          credits: true,
           isActive: true,
           createdAt: true,
           lastLogin: true,
@@ -228,6 +294,7 @@ router.get('/users', authenticate, requireAdmin, async (req: Request, res: Respo
       picture: u.picture || null,
       authMethod: u.authMethod,
       plan: (u.subscription && (u.subscription as any).plan) || 'free',
+      credits: u.credits ?? 0,
       isActive: u.isActive,
       createdAt: u.createdAt,
       lastLogin: u.lastLogin,
