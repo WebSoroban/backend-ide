@@ -45,11 +45,12 @@ const CURATED: CuratedModel[] = [
   {
     id: AUTO_MODEL_ID,
     label: 'Auto',
-    vendor: 'OpenRouter',
+    // Neutral — never surface the underlying routing provider in the UI.
+    vendor: 'Auto',
     effort: 'Medium',
     reasoning: false,
     recommended: true,
-    blurb: 'Route to the best available coding model',
+    blurb: 'Automatically picks the best model for the task',
   },
   { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8', vendor: 'Anthropic', effort: 'High', reasoning: true, recommended: true, blurb: 'Top-tier reasoning for hard contract work' },
   { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6', vendor: 'Anthropic', effort: 'Medium', reasoning: true, recommended: true, blurb: 'Fast, strong default for agentic edits' },
