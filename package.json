@@ -24,6 +24,10 @@
     "prisma:studio": "prisma studio",
     "generate-invites": "tsx scripts/generate-invites.ts",
     "backfill:file-paths": "tsx scripts/backfill-file-paths.ts",
+    "seed:skills": "tsx scripts/seed-skills.ts",
+    "dodo:products": "tsx scripts/create-dodo-products.ts",
+    "worker:billing": "node dist/workers/billingWorker.js",
+    "worker:billing:dev": "tsx watch workers/billingWorker.ts",
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
@@ -36,6 +40,7 @@
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "dockerode": "^4.0.2",
+    "dodopayments": "^2.39.1",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "fs-extra": "^11.2.0",
@@ -51,7 +56,8 @@
     "pdfkit": "^0.14.0",
     "prisma": "^6.19.3",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.1",
+    "standardwebhooks": "^1.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

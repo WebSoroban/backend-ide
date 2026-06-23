@@ -22,8 +22,34 @@ import userService from '../services/userService';
 import { COPILOT_MODES, type CopilotMode, type ProposedEdit } from '../services/ai/types';
 import { coerceNetwork } from '../lib/networks';
 import { rateLimit } from '../middleware/rateLimit';
+import { getBalance } from '../services/billing/credits';
+import { publicPacks } from '../services/billing/config';
 
 const router = express.Router();
+
+/**
+ * Server-side credit gate (non-bypassable). Returns true if the user may start a
+ * run. Users on a BYO OpenRouter key are NOT metered (they pay OpenRouter
+ * directly). Everyone else needs a positive balance; otherwise we 402 with the
+ * out-of-credits payload + the credit packs for the upgrade modal, and the caller
+ * must NOT create/enqueue the run.
+ */
+async function ensureCredits(userId: string, res: Response): Promise<boolean> {
+  const setting = await prisma.aiSetting.findUnique({
+    where: { userId },
+    select: { openRouterKeyEncrypted: true },
+  });
+  if (setting?.openRouterKeyEncrypted) return true; // BYO key → unmetered
+  const balance = await getBalance(userId);
+  if (balance > 0) return true;
+  res.status(402).json({
+    error: 'OUT_OF_CREDITS',
+    message: "You're out of AI credits. Top up to keep using the Copilot.",
+    balance,
+    plans: publicPacks(),
+  });
+  return false;
+}
 
 const NETWORK = 'testnet';
 
@@ -197,6 +223,9 @@ router.post('/threads/:id/messages', authenticate, aiLimiter, async (req: Reques
       return res.status(400).json({ error: 'content is required' });
     }
     if (!thread.projectId) return res.status(400).json({ error: 'Thread is not attached to a project' });
+
+    // Credit gate — never start the agent loop without credits (server-side).
+    if (!(await ensureCredits(userId, res))) return;
 
     const runMode: CopilotMode = isMode(mode) ? mode : (thread.mode as CopilotMode);
     const runModel = typeof model === 'string' && model ? model : thread.model;
@@ -530,6 +559,9 @@ router.post('/plans/:id/build', authenticate, aiLimiter, async (req: Request, re
     if (plan.userId !== userId) return res.status(403).json({ error: 'Forbidden' });
     if (!plan.projectId) return res.status(400).json({ error: 'Plan has no project' });
 
+    // Credit gate before kicking off the build run.
+    if (!(await ensureCredits(userId, res))) return;
+
     // Build runs in AGENT mode against the plan content, in a fresh thread.
     const model = typeof req.body.model === 'string' && req.body.model ? req.body.model : 'openrouter/auto';
     const maxMode = req.body.maxMode === true;
@@ -591,6 +623,9 @@ router.post('/multitask', authenticate, aiHeavyLimiter, async (req: Request, res
     const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true, userId: true } });
     if (!project) return res.status(404).json({ error: 'Project not found' });
     if (project.userId !== userId) return res.status(403).json({ error: 'Forbidden' });
+
+    // Credit gate — multitask spawns N runs, each of which will meter on cost.
+    if (!(await ensureCredits(userId, res))) return;
 
     const baseModel = typeof model === 'string' && model ? model : 'openrouter/auto';
     const baseMax = maxMode === true;

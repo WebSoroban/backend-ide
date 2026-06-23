@@ -23,6 +23,9 @@ import contractsRoutes from './routes/contracts';
 import walletRoutes from './routes/wallet';
 import userTemplatesRoutes from './routes/userTemplates';
 import aiRoutes from './routes/ai';
+import skillsRoutes from './routes/skills';
+import billingRoutes from './routes/billing';
+import dodoWebhookRoutes from './routes/webhooks/dodo';
 import { initObservability, captureError, logger } from './lib/observability';
 
 // Initialize error monitoring (Sentry if SENTRY_DSN + @sentry/node present).
@@ -107,6 +110,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Middleware - CORS configuration
 app.use(cors(corsOptions));
 app.use(cookieParser());
+// Dodo webhook needs the RAW body for Standard Webhooks signature verification —
+// mount it with a raw parser BEFORE express.json() (which would otherwise consume
+// and re-serialize the body, breaking the HMAC).
+app.use('/api/webhooks/dodo', express.raw({ type: '*/*' }), dodoWebhookRoutes);
 app.use(express.json());
 app.use(passport.initialize());
 
@@ -143,7 +150,10 @@ app.use('/api/usage', usageRoutes);
 app.use('/api/contracts', contractsRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/user-templates', userTemplatesRoutes);
+// Skills mounts under /api/ai/skills — register BEFORE the generic /api/ai router.
+app.use('/api/ai/skills', skillsRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/billing', billingRoutes);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {

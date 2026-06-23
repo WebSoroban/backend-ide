@@ -37,6 +37,12 @@ model User {
   picture            String?
   subscription       Json     @default("{\"plan\":\"free\",\"status\":\"active\"}")
   usage              Json     @default("{}")
+  // AI Copilot credits (fiat, via Dodo). Denormalized running balance kept in
+  // lock-step with CreditLedger inside the same transaction; the ledger is the
+  // source of truth. Distinct from the testnet-XLM plan/template payment flow.
+  credits            Int      @default(0)
+  // Dodo Payments customer id (fiat billing), created/reused at first checkout.
+  dodoCustomerId     String?
   isActive           Boolean  @default(true)
   lastLogin          DateTime @default(now())
   purchasedTemplates String[] @default([])
@@ -60,6 +66,10 @@ model User {
   plans             Plan[]
   aiSetting         AiSetting?
   keyExports        KeyExportAudit[]
+  skills            Skill[]
+  skillPreferences  SkillPreference[]
+  creditLedger      CreditLedger[]
+  aiUsage           AiUsage[]
 
   @@index([authMethod])
 }
@@ -551,4 +561,133 @@ model Plan {
 
   @@index([userId, updatedAt])
   @@index([projectId])
+}
+
+// ---------------------------------------------------------------------------
+// Skill — a user-authored (or OFFICIAL, ownerId null) Soroban/Stellar knowledge
+// + instruction pack the Copilot loads as CONTEXT (Cursor/Claude-style "skills"),
+// scoped to Soroban. Progressive disclosure keeps it token-efficient:
+//   - the INDEX (name + description + whenToUse) is injected every run (cheap);
+//   - the BODY is pulled on demand via the load_skill tool, injected every run
+//     for scope="always", and force-loaded when the user @skill:<slug>-mentions it.
+// Skill bodies are GUIDANCE/DATA, never authority: they can shape HOW contracts
+// are written but cannot widen the Soroban-only scope, the file-type allowlist,
+// or the secret/deploy/safety rules (enforced in the harness guardrail layer and
+// validated on save). `slug` is the @skill/load_skill handle (unique per owner).
+// Per-user enable/disable of official/public skills lives in SkillPreference.
+// ---------------------------------------------------------------------------
+model Skill {
+  id          String   @id @default(cuid())
+  ownerId     String? // null => OFFICIAL (seeded, global)
+  official    Boolean  @default(false)
+  name        String
+  slug        String
+  description String   @default("")
+  whenToUse   String   @default("")
+  body        String   @default("")
+  scope       String   @default("auto") // always | auto | manual
+  enabled     Boolean  @default(true)
+  visibility  String   @default("private") // private | public
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner       User?             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  preferences SkillPreference[]
+
+  @@unique([ownerId, slug])
+  @@index([ownerId, enabled])
+  @@index([official, enabled])
+  @@index([visibility])
+}
+
+// ---------------------------------------------------------------------------
+// SkillPreference — a per-user enable/disable override for a skill the user does
+// not own (an OFFICIAL skill, or a PUBLIC skill from another user). Owners toggle
+// their own skills via Skill.enabled directly; this table records the toggle for
+// everyone else, so official skills can be turned off per-user without mutating
+// the shared row.
+// ---------------------------------------------------------------------------
+model SkillPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  skillId   String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, skillId])
+  @@index([userId])
+}
+
+// ===========================================================================
+// AI CREDITS / FIAT BILLING (Dodo Payments)
+// ---------------------------------------------------------------------------
+// One-time credit packs bought with real money via Dodo (LIVE mode). The
+// CreditLedger is the SOURCE OF TRUTH for a user's balance; User.credits is a
+// denormalized running total updated in the SAME transaction as each ledger row.
+// This is entirely separate from the testnet-XLM plan/template payment flow
+// (Payment/Subscription models above) — do not conflate them.
+// ===========================================================================
+
+// Append-only ledger of every credit movement. Balance is derivable by summing
+// `delta`; `balanceAfter` snapshots the running total at write time.
+// Idempotency: @@unique([userId, reason, refId]) means a signup grant, a purchase
+// (refId = Dodo payment id), and a usage debit (refId = AgentRun id) can each be
+// applied at most once — a retried webhook or worker job can't double-credit/charge.
+model CreditLedger {
+  id          String   @id @default(cuid())
+  userId      String
+  // + for grants (signup/purchase/refund/admin), - for usage spend.
+  delta       Int
+  // signup_grant | purchase | usage | refund | admin
+  reason      String
+  // paymentId (purchase) | aiRunId (usage) | "signup" (signup_grant) | null.
+  refId       String?
+  // The user's credit balance immediately after this entry was applied.
+  balanceAfter Int
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, reason, refId])
+  @@index([userId, createdAt])
+}
+
+// Per-run AI usage record: actual model cost (from OpenRouter) and the credits
+// charged for it. `runId` is unique so a retried worker can't write twice.
+model AiUsage {
+  id            String   @id @default(cuid())
+  userId        String
+  runId         String   @unique
+  model         String
+  mode          String
+  tokensIn      Int      @default(0)
+  tokensOut     Int      @default(0)
+  // Actual USD cost reported by OpenRouter for all model calls in the run.
+  costUsd       Float    @default(0)
+  // Credits debited for this run (costUsd → credits via the configured rate).
+  creditsCharged Int     @default(0)
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Dedupe table for incoming Dodo webhook events (Standard Webhooks `webhook-id`).
+// The credit grant is also idempotent via the ledger unique constraint; this
+// gives a fast "already handled" ack and an audit trail of what we received.
+model ProcessedWebhookEvent {
+  id          String   @id @default(cuid())
+  // The Standard Webhooks `webhook-id` header (provider event id).
+  eventId     String   @unique
+  source      String   @default("dodo")
+  type        String?
+  payload     Json?
+  createdAt   DateTime @default(now())
+
+  @@index([source, createdAt])
 }

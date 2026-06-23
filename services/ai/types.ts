@@ -80,6 +80,8 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Actual USD cost OpenRouter reports for this request (usage accounting on). */
+  costUsd: number;
 }
 
 /** A proposed file edit, surfaced to the diff-review UI (never auto-written silently). */

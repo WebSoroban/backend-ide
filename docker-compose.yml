@@ -134,6 +134,27 @@ services:
     deploy:
       replicas: 1
 
+  # Billing (credit-grant) worker. Lightweight — processes verified Dodo webhook
+  # events from the `billing` queue and grants credits (DB + Redis + Dodo API
+  # only; no Rust/Stellar toolchain). Needs the Dodo env (from .env).
+  worker-billing:
+    build:
+      context: .
+      dockerfile: Dockerfiles/Dockerfile.billing
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BILLING_WORKER_CONCURRENCY=${BILLING_WORKER_CONCURRENCY:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
   compiler:
     build:
       context: .

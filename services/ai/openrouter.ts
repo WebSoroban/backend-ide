@@ -101,18 +101,25 @@ function buildBody(opts: ChatCompletionOptions, stream: boolean) {
   if (opts.response_format) body.response_format = opts.response_format;
   if (opts.max_tokens) body.max_tokens = opts.max_tokens;
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
-  if (stream) body.usage = { include: true }; // ask OpenRouter to stream a usage chunk
+  // Enable OpenRouter usage accounting so the response carries the real USD cost
+  // (`usage.cost`) we meter credits against — for streamed AND one-shot calls.
+  body.usage = { include: true };
   return body;
 }
 
-const EMPTY_USAGE: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+const EMPTY_USAGE: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, costUsd: 0 };
 
 function parseUsage(usage: any): TokenUsage {
   if (!usage) return { ...EMPTY_USAGE };
+  // OpenRouter returns the real USD cost as `usage.cost` when usage accounting is
+  // enabled (we set `usage: { include: true }`). cost_details.upstream may also be
+  // present; `cost` is the amount actually billed to our OpenRouter account.
+  const cost = typeof usage.cost === 'number' ? usage.cost : Number(usage.cost) || 0;
   return {
     promptTokens: usage.prompt_tokens ?? 0,
     completionTokens: usage.completion_tokens ?? 0,
     totalTokens: usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0),
+    costUsd: cost > 0 ? cost : 0,
   };
 }
 

@@ -1,0 +1,21 @@
+# Railway config for the BILLING (credit-grant) worker service.
+#
+# Processes verified Dodo webhook events from the `billing` queue and grants
+# credits (workers/billingWorker.ts). Lightweight — uses the lean Node image, not
+# the Rust toolchain image the build workers use. Needs the SAME shared REDIS_URL
+# and DATABASE_URL/DIRECT_URL as the API, plus the Dodo env (DODO_PAYMENTS_API_KEY,
+# DODO_PAYMENTS_ENVIRONMENT) and the credit config — set those on this service.
+#
+# Point the worker-billing service at this file:
+#   Service → Settings → Config-as-code → Railway Config File = railway.worker-billing.toml
+#
+# No healthcheckPath: workers don't run an HTTP server, so a health check would
+# fail and restart them in a loop.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfiles/Dockerfile.billing"
+
+[deploy]
+startCommand = "node dist/workers/billingWorker.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

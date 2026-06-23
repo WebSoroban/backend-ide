@@ -6,6 +6,9 @@ import prisma from '../lib/prisma';
 import { decrypt } from '../lib/crypto';
 import { runAgent, type PriorMessage, type RunInput } from '../services/ai/harness';
 import { completeChat } from '../services/ai/openrouter';
+import { getActiveSkillsForUser } from '../services/ai/skills';
+import { getBalance, recordUsageAndDebit } from '../services/billing/credits';
+import { costToCredits } from '../services/billing/config';
 import type { CopilotMode } from '../services/ai/types';
 import { initObservability, captureError } from '../lib/observability';
 
@@ -83,6 +86,13 @@ async function processAgentJob(job: Job) {
     const rulesFile = files.find((f) => RULES_FILES.includes(f.path));
     const rules = rulesFile?.content;
 
+    // The user's effective-enabled skills (personal + official, minus per-user
+    // disables). Private skills are owner-scoped, so they never leak across users.
+    const skills = await getActiveSkillsForUser(run.userId).catch((e) => {
+      console.warn('[AgentWorker] Could not load skills:', e.message);
+      return [];
+    });
+
     // Per-user BYO OpenRouter key (decrypted just-in-time; never logged).
     let apiKey: string | undefined;
     const setting = await prisma.aiSetting.findUnique({ where: { userId: run.userId } });
@@ -93,6 +103,12 @@ async function processAgentJob(job: Job) {
         console.warn('[AgentWorker] Could not decrypt BYO key:', e.message);
       }
     }
+
+    // Metering: users on the shared key spend credits (metered on actual cost).
+    // BYO-key users pay OpenRouter directly, so they are NOT metered. Pass the
+    // current balance as the run's credit budget so a single run can't overspend.
+    const metered = !apiKey;
+    const creditBudget = metered ? await getBalance(run.userId) : undefined;
 
     const input: RunInput = {
       runId,
@@ -113,6 +129,8 @@ async function processAgentJob(job: Job) {
       },
       priorMessages,
       rules,
+      skills,
+      creditBudget,
     };
 
     // First turn → generate a short AI title for the conversation tab, persist it,
@@ -131,9 +149,33 @@ async function processAgentJob(job: Job) {
 
     const out = await runAgent(input, emit, checkCancelled);
 
+    // Meter ACTUAL cost → credits and debit in one transaction (shared-key users
+    // only; BYO-key users pay OpenRouter directly). Idempotent by runId. Done for
+    // cancelled runs too — they still incurred real model cost up to the stop.
+    let creditBalance: number | undefined;
+    if (metered) {
+      const creditsCharged = costToCredits(out.costUsd);
+      try {
+        const res = await recordUsageAndDebit({
+          userId: run.userId,
+          runId,
+          model: run.model,
+          mode: run.mode,
+          tokensIn: out.tokensIn,
+          tokensOut: out.tokensOut,
+          costUsd: out.costUsd,
+          creditsCharged,
+        });
+        creditBalance = res.balance;
+        emit('credits', { balance: res.balance, charged: creditsCharged });
+      } catch (e: any) {
+        console.warn('[AgentWorker] usage metering failed:', e.message);
+      }
+    }
+
     if (out.finishReason === 'cancelled') {
       await prisma.agentRun.update({ where: { id: runId }, data: { status: 'cancelled' } });
-      emit('status', { phase: 'cancelled' });
+      emit('status', { phase: 'cancelled', creditBalance });
       return;
     }
 
@@ -219,6 +261,7 @@ async function processAgentJob(job: Job) {
       planId,
       capped: out.capped,
       title: aiTitle, // carry the AI title on done too (covers any early-event race)
+      creditBalance, // current credit balance after metering (undefined for BYO)
     });
 
     await maybeFinalizeParent(run.parentRunId);

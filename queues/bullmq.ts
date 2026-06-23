@@ -40,6 +40,7 @@ const COMPILE_QUEUE_NAME = 'compile';
 const DEPLOY_QUEUE_NAME = 'deploy';
 const TEST_QUEUE_NAME = 'test';
 const AGENT_QUEUE_NAME = 'agent';
+const BILLING_QUEUE_NAME = 'billing';
 
 /**
  * Create a queue instance
@@ -97,7 +98,8 @@ export {
   COMPILE_QUEUE_NAME,
   DEPLOY_QUEUE_NAME,
   TEST_QUEUE_NAME,
-  AGENT_QUEUE_NAME
+  AGENT_QUEUE_NAME,
+  BILLING_QUEUE_NAME
 };
 
 export default {
@@ -108,5 +110,6 @@ export default {
   COMPILE_QUEUE_NAME,
   DEPLOY_QUEUE_NAME,
   TEST_QUEUE_NAME,
-  AGENT_QUEUE_NAME
+  AGENT_QUEUE_NAME,
+  BILLING_QUEUE_NAME
 };

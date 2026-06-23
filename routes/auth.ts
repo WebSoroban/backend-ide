@@ -8,6 +8,7 @@ import userService from '../services/userService';
 import walletService from '../services/wallet';
 import { generateToken, generateChallenge } from '../utils/auth';
 import { authenticate } from '../middleware/auth';
+import { ensureSignupGrant } from '../services/billing/credits';
 
 const router = express.Router();
 
@@ -443,6 +444,17 @@ router.get('/me', authenticate, async (req: Request, res: Response) => {
   try {
     const user = req.user!;
 
+    // Idempotently grant the one-time free AI credits. /me is the universal
+    // post-login chokepoint, so this also backfills pre-existing users exactly
+    // once (guarded by the signup_grant ledger row + unique constraint).
+    let credits = (user as any).credits ?? 0;
+    try {
+      const res = await ensureSignupGrant(user.id);
+      credits = res.balance;
+    } catch (e: any) {
+      console.warn('[auth/me] signup grant check failed:', e.message);
+    }
+
     res.json({
       success: true,
       user: {
@@ -454,6 +466,7 @@ router.get('/me', authenticate, async (req: Request, res: Response) => {
         authMethod: user.authMethod,
         subscription: user.subscription,
         usage: user.usage,
+        credits,
         purchasedTemplates: user.purchasedTemplates || [],
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
