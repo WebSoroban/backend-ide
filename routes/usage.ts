@@ -3,7 +3,6 @@ import prisma from '../lib/prisma';
 import userService from '../services/userService';
 import { withId } from '../lib/serialize';
 import { authenticate } from '../middleware/auth';
-import { requireAdmin } from '../middleware/admin';
 
 const router = express.Router();
 
@@ -87,7 +86,7 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
  * GET /api/usage/summary
  * Get aggregate usage statistics for the whole project (all users)
  */
-router.get('/summary', authenticate, requireAdmin, async (req: Request, res: Response) => {
+router.get('/summary', async (req: Request, res: Response) => {
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -149,13 +148,13 @@ router.get('/summary', authenticate, requireAdmin, async (req: Request, res: Res
 });
 
 /**
- * GET /api/usage/billing  (admin only)
+ * GET /api/usage/billing
  * Platform-wide AI credit + billing metrics: credits granted/purchased/spent
  * (from the CreditLedger), the outstanding credit liability (sum of balances),
  * and our actual model spend + credits charged (from AiUsage). Lets us see
  * revenue proxy (credits purchased) vs cost (OpenRouter USD) at a glance.
  */
-router.get('/billing', authenticate, requireAdmin, async (req: Request, res: Response) => {
+router.get('/billing', async (req: Request, res: Response) => {
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -217,7 +216,7 @@ router.get('/billing', authenticate, requireAdmin, async (req: Request, res: Res
  * GET /api/usage/activity
  * Get recent activity logs for all users (platform-wide for analytics)
  */
-router.get('/activity', authenticate, requireAdmin, async (req: Request, res: Response) => {
+router.get('/activity', async (req: Request, res: Response) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
     const logs = await prisma.usageLog.findMany({
@@ -253,11 +252,11 @@ router.get('/activity', authenticate, requireAdmin, async (req: Request, res: Re
 });
 
 /**
- * GET /api/usage/users  (admin only)
+ * GET /api/usage/users
  * User directory with per-user aggregate counts, newest first. Supports
  * ?q=<email/name search> and ?limit= (default 100, max 500).
  */
-router.get('/users', authenticate, requireAdmin, async (req: Request, res: Response) => {
+router.get('/users', async (req: Request, res: Response) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
     const q = ((req.query.q as string) || '').trim();
