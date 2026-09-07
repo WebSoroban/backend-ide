@@ -26,6 +26,7 @@ import aiRoutes from './routes/ai';
 import skillsRoutes from './routes/skills';
 import billingRoutes from './routes/billing';
 import dodoWebhookRoutes from './routes/webhooks/dodo';
+import payRoutes from './routes/pay';
 import { initObservability, captureError, logger } from './lib/observability';
 
 // Initialize error monitoring (Sentry if SENTRY_DSN + @sentry/node present).
@@ -82,8 +83,25 @@ const corsOptions: cors.CorsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"],
-  exposedHeaders: ["Content-Type"]
+  // x402 browser clients retry the request with PAYMENT-SIGNATURE after the
+  // wallet approves. Keep X-PAYMENT for v1/backwards-compatible clients.
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-API-KEY",
+    "PAYMENT-SIGNATURE",
+    "X-PAYMENT",
+    // @x402/fetch currently adds this response-oriented header to its paid
+    // retry request. Accept it so stock browser clients can complete CORS.
+    "Access-Control-Expose-Headers",
+  ],
+  exposedHeaders: [
+    "Content-Type",
+    "PAYMENT-REQUIRED",
+    "PAYMENT-RESPONSE",
+    "PAYMENT-ERROR",
+    "X-PAYMENT-RESPONSE",
+  ]
 };
 
 // Socket.IO setup with CORS
@@ -154,6 +172,7 @@ app.use('/api/user-templates', userTemplatesRoutes);
 app.use('/api/ai/skills', skillsRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/billing', billingRoutes);
+app.use('/api/pay', payRoutes);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {

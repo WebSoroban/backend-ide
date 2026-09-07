@@ -70,6 +70,7 @@ model User {
   skillPreferences  SkillPreference[]
   creditLedger      CreditLedger[]
   aiUsage           AiUsage[]
+  x402Endpoints     X402Endpoint[]
 
   @@index([authMethod])
 }
@@ -142,9 +143,10 @@ model Project {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  files       File[]
-  deployments Deployment[]
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files         File[]
+  deployments   Deployment[]
+  x402Endpoints X402Endpoint[]
 
   @@index([userId])
   @@index([userId, updatedAt])
@@ -344,6 +346,60 @@ model Payment {
 
   @@index([userId, status])
   @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// WebSoroban Pay — hosted x402 endpoints and their append-only request trail.
+// API keys are stored as SHA-256 digests; the plaintext key is returned once.
+// MVP is deliberately restricted to Stellar testnet + USDC.
+// ---------------------------------------------------------------------------
+model X402Endpoint {
+  id           String   @id @default(cuid())
+  userId       String
+  projectId    String?
+  name         String
+  slug         String   @unique
+  method       String   @default("GET")
+  price        String
+  asset        String   @default("USDC")
+  network      String   @default("stellar:testnet")
+  payTo        String
+  responseBody Json     @default("{\"message\":\"Paid access granted.\"}")
+  apiKeyHash   String   @unique
+  apiKeyPrefix String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  events  X402Event[]
+
+  @@index([userId, updatedAt])
+  @@index([projectId])
+  @@index([active])
+}
+
+model X402Event {
+  id                 String   @id @default(cuid())
+  endpointId         String
+  type               String
+  status             String
+  requestFingerprint String?
+  transaction        String?
+  payer              String?
+  amount             String?
+  errorCode          String?
+  errorMessage       String?
+  latencyMs          Int?
+  metadata           Json     @default("{}")
+  createdAt          DateTime @default(now())
+
+  endpoint X402Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([endpointId, createdAt])
+  @@index([endpointId, status, createdAt])
+  @@index([transaction])
 }
 
 // ---------------------------------------------------------------------------
@@ -638,17 +694,17 @@ model SkillPreference {
 // (refId = Dodo payment id), and a usage debit (refId = AgentRun id) can each be
 // applied at most once — a retried webhook or worker job can't double-credit/charge.
 model CreditLedger {
-  id          String   @id @default(cuid())
-  userId      String
+  id           String   @id @default(cuid())
+  userId       String
   // + for grants (signup/purchase/refund/admin), - for usage spend.
-  delta       Int
+  delta        Int
   // signup_grant | purchase | usage | refund | admin
-  reason      String
+  reason       String
   // paymentId (purchase) | aiRunId (usage) | "signup" (signup_grant) | null.
-  refId       String?
+  refId        String?
   // The user's credit balance immediately after this entry was applied.
   balanceAfter Int
-  createdAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -659,18 +715,18 @@ model CreditLedger {
 // Per-run AI usage record: actual model cost (from OpenRouter) and the credits
 // charged for it. `runId` is unique so a retried worker can't write twice.
 model AiUsage {
-  id            String   @id @default(cuid())
-  userId        String
-  runId         String   @unique
-  model         String
-  mode          String
-  tokensIn      Int      @default(0)
-  tokensOut     Int      @default(0)
+  id             String   @id @default(cuid())
+  userId         String
+  runId          String   @unique
+  model          String
+  mode           String
+  tokensIn       Int      @default(0)
+  tokensOut      Int      @default(0)
   // Actual USD cost reported by OpenRouter for all model calls in the run.
-  costUsd       Float    @default(0)
+  costUsd        Float    @default(0)
   // Credits debited for this run (costUsd → credits via the configured rate).
-  creditsCharged Int     @default(0)
-  createdAt     DateTime @default(now())
+  creditsCharged Int      @default(0)
+  createdAt      DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -681,13 +737,13 @@ model AiUsage {
 // The credit grant is also idempotent via the ledger unique constraint; this
 // gives a fast "already handled" ack and an audit trail of what we received.
 model ProcessedWebhookEvent {
-  id          String   @id @default(cuid())
+  id        String   @id @default(cuid())
   // The Standard Webhooks `webhook-id` header (provider event id).
-  eventId     String   @unique
-  source      String   @default("dodo")
-  type        String?
-  payload     Json?
-  createdAt   DateTime @default(now())
+  eventId   String   @unique
+  source    String   @default("dodo")
+  type      String?
+  payload   Json?
+  createdAt DateTime @default(now())
 
   @@index([source, createdAt])
 }
