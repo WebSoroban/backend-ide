@@ -2,11 +2,11 @@
 #
 # Unlike the compile/deploy/test/agent workers, this one never runs Rust or the
 # Stellar CLI; it only processes verified Dodo webhook events (DB + Redis + the
-# Dodo API). So it uses the same lean node:20-alpine base as the API instead of
+# Dodo API). So it uses the same lean node:22-alpine base as the API instead of
 # the heavy rust:1.89 toolchain image — far faster to build and much smaller.
 #
 # Point the worker-billing service at railway.worker-billing.toml.
-FROM node:20-alpine
+FROM node:22-alpine
 
 # bash for convenience; no docker CLI / no Rust toolchain needed here.
 RUN apk add --no-cache curl bash
