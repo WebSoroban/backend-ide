@@ -29,6 +29,24 @@ export interface Template {
 
 export const TEMPLATE_CATALOG: Template[] = [
   {
+    id: 'paid-api-endpoint',
+    name: 'Paid API endpoint',
+    description: 'A runnable Node + TypeScript API with a $0.01 USDC x402 paywall, wired to WebSoroban\'s managed Stellar testnet facilitator. Configure one endpoint in Payment Studio, add the generated key, and ship.',
+    category: 'Payments',
+    files: ['src/server.ts', 'src/websoroban-pay.ts', 'src/config.ts', 'package.json', 'tsconfig.json', '.env.example', 'requests.http', 'README.md'],
+    price: 0,
+    documentation: {
+      summary: 'An end-to-end paid API starter. GET /api/research-brief is protected by the x402 exact scheme and settles USDC on Stellar testnet through WebSoroban Pay. The generated adapter keeps the scoped endpoint key server-side and talks only to WebSoroban\'s managed facilitator; the route handler runs only after a valid payment is verified.',
+      usage: 'Create a $0.01 endpoint in Payment Studio, copy its endpoint id, scoped key, and recipient address into .env, then run pnpm install and pnpm dev. GET /health is public; GET /api/research-brief returns HTTP 402 until an x402 client pays.',
+      functions: [
+        { name: 'GET /health', params: [], returns: '200 application/json', description: 'Public health check for local and production deploys.' },
+        { name: 'GET /api/research-brief', params: ['x402 payment header'], returns: '402 challenge or 200 application/json', description: 'Charges $0.01 USDC on Stellar testnet before returning the protected research brief.' },
+        { name: 'createWebSorobanPay', params: ['apiUrl', 'apiKey', 'endpointId', 'payTo'], returns: 'x402 route middleware', description: 'Connects the route to the managed WebSoroban facilitator without exposing facilitator credentials.' }
+      ],
+      readMore: 'The scaffold pins Node 22 because @x402/stellar is ESM-first and requires Node 22 or newer. Start with the included requests.http file to confirm the 402 challenge, then use WebSoroban\'s browser checkout or an x402-aware client to approve and settle the testnet payment.'
+    }
+  },
+  {
     id: 'counter-mf',
     name: 'Counter (multi-file)',
     description: 'A persistent counter split across modules — the contract entrypoint in src/lib.rs, instance storage in src/storage.rs, and event publishing in src/events.rs — with a unit test and an integration test. A clean starting point for a real multi-file project.',

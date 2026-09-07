@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { FREE_TEMPLATE_IDS, getTemplateById } from '../data/templateCatalog';
+import { getBundle } from '../data/templateBundles';
+
+test('Paid API endpoint is a free, complete scaffold', () => {
+  const template = getTemplateById('paid-api-endpoint');
+  const bundle = getBundle('paid-api-endpoint');
+
+  assert.ok(template);
+  assert.ok(bundle);
+  assert.equal(template.name, 'Paid API endpoint');
+  assert.equal(template.category, 'Payments');
+  assert.ok(FREE_TEMPLATE_IDS.includes(template.id));
+  assert.equal(bundle.manifestPath, 'package.json');
+
+  const files = new Map(bundle.files.map((file) => [file.path, file.content]));
+  for (const path of template.files) assert.ok(files.has(path), `missing scaffold file: ${path}`);
+
+  const packageJson = JSON.parse(files.get('package.json')!);
+  assert.equal(packageJson.engines.node, '>=22.0.0');
+  assert.equal(packageJson.dependencies['@x402/stellar'], '^2.25.0');
+
+  const server = files.get('src/server.ts')!;
+  assert.match(server, /pay\.protect\('GET \/api\/research-brief', '\$0\.01'/);
+  assert.match(server, /app\.get\('\/api\/research-brief'/);
+
+  const adapter = files.get('src/websoroban-pay.ts')!;
+  assert.match(adapter, /\/pay\/facilitator/);
+  assert.match(adapter, /stellar:testnet/);
+  assert.doesNotMatch(files.get('.env.example')!, /28076b0b-57cd-42b1-9cbc-b386e762c1dc/);
+});

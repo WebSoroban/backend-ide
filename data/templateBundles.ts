@@ -5,9 +5,9 @@
  *   { manifestPath, deployTarget?, defaultTests?, files: [{ path, content }] }
  *
  * "Use template" scaffolds the whole tree into a new project (see routes/projects).
- * Single-file templates are just one-file bundles. Every bundle here is a real,
- * compiling Soroban contract — verified with `stellar contract build` (and, for
- * the ones with tests, `cargo test`) before shipping.
+ * Single-file templates are just one-file bundles. Most bundles are compiling
+ * Soroban contracts; application templates can carry their own runtime manifest
+ * and verification commands.
  */
 
 export interface BundleFile {
@@ -16,7 +16,7 @@ export interface BundleFile {
 }
 
 export interface TemplateBundle {
-  /** Project-relative path of the driving Cargo manifest. */
+  /** Project-relative path of the driving project manifest. */
   manifestPath: string;
   /** For workspaces: the crate whose wasm is deployed by default. */
   deployTarget?: string;
@@ -683,7 +683,257 @@ fn factory_bumps_child_via_cross_contract() {
   ]
 };
 
+// ---------------------------------------------------------------------------
+// Paid API endpoint — a runnable Node/TypeScript service protected by x402 on
+// Stellar testnet. The managed adapter is included in the generated tree so the
+// scaffold works before @websoroban/pay is published as a public npm package.
+// ---------------------------------------------------------------------------
+const PAID_API_ENDPOINT: TemplateBundle = {
+  manifestPath: 'package.json',
+  files: [
+    {
+      path: 'package.json',
+      content: `{
+  "name": "websoroban-paid-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "build": "tsc",
+    "start": "node --env-file=.env dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/core": "^2.25.0",
+    "@x402/express": "^2.25.0",
+    "@x402/stellar": "^2.25.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+`
+    },
+    {
+      path: 'tsconfig.json',
+      content: `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}
+`
+    },
+    {
+      path: '.env.example',
+      content: `# Copy this file to .env. Create the endpoint in WebSoroban Payment Studio.
+WEBSOROBAN_API_URL=https://backend-ide-production.up.railway.app/api
+WEBSOROBAN_ENDPOINT_ID=replace_with_endpoint_id
+WEBSOROBAN_PAY_KEY=replace_with_scoped_endpoint_key
+STELLAR_PAY_TO=G_REPLACE_WITH_YOUR_TESTNET_RECIPIENT
+PORT=8787
+`
+    },
+    {
+      path: 'src/config.ts',
+      content: `function required(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(\`Missing \${name}. Copy .env.example to .env and fill it in.\`);
+  return value;
+}
+
+export const config = {
+  port: Number(process.env.PORT || 8787),
+  apiUrl: process.env.WEBSOROBAN_API_URL || 'https://backend-ide-production.up.railway.app/api',
+  endpointId: required('WEBSOROBAN_ENDPOINT_ID'),
+  apiKey: required('WEBSOROBAN_PAY_KEY'),
+  payTo: required('STELLAR_PAY_TO'),
+};
+`
+    },
+    {
+      path: 'src/websoroban-pay.ts',
+      content: `import type { RequestHandler } from 'express';
+import { paymentMiddleware, x402ResourceServer } from '@x402/express';
+import { HTTPFacilitatorClient } from '@x402/core/server';
+import { ExactStellarScheme } from '@x402/stellar/exact/server';
+
+const STELLAR_TESTNET = 'stellar:testnet' as const;
+
+export interface WebSorobanPayOptions {
+  apiUrl: string;
+  apiKey: string;
+  endpointId: string;
+  payTo: string;
+}
+
+export interface ProtectOptions {
+  description?: string;
+  maxTimeoutSeconds?: number;
+}
+
+export function createWebSorobanPay(options: WebSorobanPayOptions) {
+  if (!options.apiKey) throw new Error('WEBSOROBAN_PAY_KEY is required.');
+  if (!options.endpointId) throw new Error('WEBSOROBAN_ENDPOINT_ID is required.');
+  if (!/^G[A-Z2-7]{55}$/.test(options.payTo)) {
+    throw new Error('STELLAR_PAY_TO must be a Stellar G-address.');
+  }
+
+  const facilitator = new HTTPFacilitatorClient({
+    url: options.apiUrl.replace(/\\/$/, '') + '/pay/facilitator',
+    createAuthHeaders: async () => {
+      const auth = { Authorization: 'Bearer ' + options.apiKey };
+      return { verify: auth, settle: auth, supported: auth };
+    },
+  });
+
+  const resourceServer = new x402ResourceServer(facilitator)
+    .register(STELLAR_TESTNET, new ExactStellarScheme());
+
+  return {
+    protect(
+      route: \`\${'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'} /\${string}\`,
+      price: string,
+      settings: ProtectOptions = {},
+    ): RequestHandler {
+      return paymentMiddleware({
+        [route]: {
+          accepts: {
+            scheme: 'exact',
+            network: STELLAR_TESTNET,
+            price,
+            payTo: options.payTo,
+            maxTimeoutSeconds: settings.maxTimeoutSeconds ?? 60,
+          },
+          serviceName: 'WebSoroban Pay',
+          description: settings.description || 'A Stellar testnet endpoint protected by x402.',
+          mimeType: 'application/json',
+        },
+      }, resourceServer, undefined, undefined, true);
+    },
+  };
+}
+`
+    },
+    {
+      path: 'src/server.ts',
+      content: `import 'dotenv/config';
+import express from 'express';
+import { config } from './config.js';
+import { createWebSorobanPay } from './websoroban-pay.js';
+
+const app = express();
+app.use(express.json());
+
+const pay = createWebSorobanPay({
+  apiUrl: config.apiUrl,
+  apiKey: config.apiKey,
+  endpointId: config.endpointId,
+  payTo: config.payTo,
+});
+
+app.get('/health', (_request, response) => {
+  response.json({ ok: true, network: 'stellar:testnet' });
+});
+
+// This is the one-line paywall. The handler below runs only after settlement.
+app.use(pay.protect('GET /api/research-brief', '$0.01', {
+  description: 'Unlock the WebSoroban research brief.',
+}));
+
+app.get('/api/research-brief', (_request, response) => {
+  response.json({
+    title: 'Agentic payments on Stellar',
+    summary: 'The request paid 0.01 USDC and reached the protected handler.',
+    paid: true,
+    network: 'stellar:testnet',
+  });
+});
+
+app.listen(config.port, () => {
+  console.log(\`Paid API listening on http://localhost:\${config.port}\`);
+  console.log(\`Protected route: http://localhost:\${config.port}/api/research-brief\`);
+});
+`
+    },
+    {
+      path: 'requests.http',
+      content: `### Public health check
+GET http://localhost:8787/health
+
+### Unpaid request — should return HTTP 402 with x402 payment requirements
+GET http://localhost:8787/api/research-brief
+Accept: application/json
+`
+    },
+    {
+      path: 'README.md',
+      content: `# Paid API endpoint
+
+A runnable Express + TypeScript endpoint protected by **$0.01 USDC on Stellar testnet** through WebSoroban's managed x402 facilitator.
+
+## 1. Create the payment endpoint
+
+Open **WebSoroban → Payments → New endpoint** and create a testnet endpoint with:
+
+- Route: \`GET /api/research-brief\`
+- Price: \`$0.01\`
+- Recipient: your funded Stellar testnet G-address
+
+Copy the endpoint id and the scoped key when it is shown. The key is displayed once.
+
+## 2. Configure and run
+
+\`\`\`bash
+cp .env.example .env
+# Fill WEBSOROBAN_ENDPOINT_ID, WEBSOROBAN_PAY_KEY, and STELLAR_PAY_TO
+pnpm install
+pnpm dev
+\`\`\`
+
+Node 22 or newer is required by \`@x402/stellar\`.
+
+## 3. Confirm the paywall
+
+\`\`\`bash
+curl -i http://localhost:8787/api/research-brief
+\`\`\`
+
+The first request returns **HTTP 402** and payment requirements. An x402-compatible client signs the Stellar authorization, retries with the payment header, and receives the protected JSON after settlement.
+
+Use \`requests.http\` for the public health check and unpaid challenge. The scoped key stays on this server; never expose it in browser code or commit your \`.env\` file.
+`
+    },
+    {
+      path: '.gitignore',
+      content: `node_modules/
+.env
+dist/
+`
+    }
+  ]
+};
+
 export const TEMPLATE_BUNDLES: Record<string, TemplateBundle> = {
+  'paid-api-endpoint': PAID_API_ENDPOINT,
   'counter-mf': COUNTER_MF,
   'access-control-mf': ACCESS_CONTROL_MF,
   'token-mf': TOKEN_MF,
