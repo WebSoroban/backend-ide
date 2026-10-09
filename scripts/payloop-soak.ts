@@ -81,8 +81,7 @@ async function createPolicy(subscriber: Keypair, merchant: Keypair) {
 }
 
 async function act(subscriber: Keypair, method: 'pause' | 'resume' | 'revoke', policyId: bigint) {
-  const args = method === 'revoke' ? [u64(policyId), nativeToScVal(await liveUntil(), { type: 'u32' })] : [u64(policyId)];
-  return submitCall(ctx.server, ctx.config.passphrase, subscriber, contract().call(method, ...args));
+  return submitCall(ctx.server, ctx.config.passphrase, subscriber, contract().call(method, u64(policyId)));
 }
 
 async function recurringCharges(policyIds: bigint[]) {

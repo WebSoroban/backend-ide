@@ -19,20 +19,26 @@ scripts/payloop-*.ts      deploy, reconcile, live soak test
 | Function | Signer | Behaviour |
 | --- | --- | --- |
 | `create_policy(subscriber, merchant, amount, interval, cap, allowance_live_until)` | subscriber | Validates terms, grants the allowance, takes the first charge. Any failure reverts everything. |
-| `charge(policy_id)` | anyone | Takes a due charge. Returns `Charged`, or records `InsufficientBalance` / `InsufficientAllowance` on-chain without moving funds. |
+| `charge(policy_id)` | anyone | Takes a due charge. Returns `Charged`, or reports `InsufficientBalance` / `InsufficientAllowance` without moving funds (recorded on-chain at most once per `min(interval, 1 day)`). |
 | `pause` / `resume(policy_id)` | subscriber | Resuming after a missed date starts a new period now. |
-| `revoke(policy_id, allowance_live_until)` | subscriber | Final. Shrinks the allowance to the remaining policies' commitment. |
+| `revoke(policy_id)` | subscriber | Final. Releases the commitment without touching the allowance, so nothing can make it fail. |
 | `cancel(policy_id)` | merchant | Final. |
-| `refresh_allowance(subscriber, allowance_live_until)` | subscriber | Re-grants exactly the committed allowance. |
+| `refresh_allowance(subscriber, allowance_live_until)` | subscriber | Re-grants exactly the committed allowance: renews before expiry and trims leftovers. |
 | `get_policy`, `committed`, `policy_count`, `token` | — | Reads. |
 
 Invariants:
 
-- The allowance granted to the contract equals what the subscriber's live
-  policies may still charge. Every charge consumes exactly `amount`.
-- A policy never charges more than `cap`. It completes when less than one
-  charge remains.
-- Charges stay on the original schedule but never back-bill missed periods.
+- The allowance covers what the subscriber's live policies may still charge.
+  Every charge consumes exactly `amount`. Leftover allowance from ended
+  policies cannot be spent, because each policy is capped; `refresh_allowance`
+  trims it.
+- A policy never charges more than `cap` (at most 100M USDC). It completes when
+  less than one charge remains.
+- On-time charges keep the schedule. A charge later than
+  `min(interval/10, 1h)` re-anchors, so charges are always at least
+  `interval − grace` apart and missed periods are never back-billed.
+- Intervals run from 1 minute to 90 days, inside the longest allowance a
+  network allows. The allowance expiry is never shortened.
 - `allowance_live_until` is an explicit, signed argument. The token `approve`
   is part of the subscriber's signed auth tree, so its arguments must be the
   same at simulation and execution; reading the ledger inside the contract
@@ -40,7 +46,7 @@ Invariants:
 
 ```bash
 cd contracts/payloop
-cargo test                 # 21 unit tests
+cargo test                 # 26 unit tests
 stellar contract build     # stellar-cli 25.2+ (soroban-sdk 29 requires its spec shaking)
 ```
 
@@ -95,10 +101,11 @@ successful charges against the indexed payment rows. `GET /api/payloop/stats`
 reports how many recurring charges landed within `PAYLOOP_ON_SCHEDULE_SECONDS`
 (default 60) of their due time, and the p50 and p95 lateness.
 
-Last soak (testnet, 2026-10-09): 3 policies, 21 recurring charges with no
-manual intervention, all within one interval of their due time (p50 5s,
-max 15s). A failed first charge left no policy. Pause, resume, and revoke
-worked from the subscriber key, and reconciliation matched 4/4 policies.
+Last soak (testnet, 2026-10-09, after the security-review fixes): 3 policies,
+21 recurring charges with no manual intervention, all within one interval of
+their due time (p50 5s, max 10s). A failed first charge left no policy. Pause,
+resume, and revoke worked from the subscriber key, and reconciliation matched
+3/3 policies.
 
 ## API
 
@@ -110,6 +117,8 @@ worked from the subscriber key, and reconciliation matched 4/4 policies.
 
 ## Before mainnet
 
-- Independent security review of `contracts/payloop` (no mainnet funds before it).
+- Independent security review of `contracts/payloop` (no mainnet funds before
+  it). The package for the reviewers, including the internal review's
+  findings and their fixes, is `contracts/payloop/AUDIT.md`.
 - A dedicated relayer account with fee monitoring and alerting.
 - Alerting on worker tick failures, retention gaps, and reconciliation mismatches.

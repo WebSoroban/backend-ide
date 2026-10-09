@@ -6,13 +6,13 @@
 //!
 //! Custody model
 //! -------------
-//! The contract holds a token *allowance*, not a balance. Its invariant is
-//! that the allowance a subscriber grants this contract equals the sum of what
-//! their live policies may still charge (`committed`). Creating a policy grows
-//! the allowance, every charge consumes exactly `amount` of it, and revoking a
-//! policy shrinks it again. Because one token allowance is shared by all of a
-//! subscriber's policies, the contract keeps the per-policy accounting and
-//! never lets a policy charge past its own cap.
+//! The contract holds a token *allowance*, not a balance. The allowance a
+//! subscriber grants this contract covers what their live policies may still
+//! charge (`committed`). Creating a policy grows the allowance and every charge
+//! consumes exactly `amount` of it. Because one token allowance is shared by
+//! all of a subscriber's policies, the contract keeps the per-policy accounting
+//! and never lets a policy charge past its own cap, so allowance left over from
+//! ended policies cannot be spent. `refresh_allowance` trims it to `committed`.
 //!
 //! Actions
 //! -------
@@ -29,6 +29,13 @@
 //!   its cap. Missed periods are never back-billed. A charge the subscriber
 //!   cannot cover is recorded on-chain instead of reverting.
 //! - `pause`, `resume`, `revoke` (subscriber), `cancel` (merchant).
+//!   `revoke` never touches the allowance, so a charge landing on another
+//!   policy between signing and submission cannot make revocation fail.
+//!
+//! Scheduling: an on-time charge keeps the original schedule. A charge more
+//! than a grace period late starts the next period from now, so consecutive
+//! charges are always at least `interval - grace` apart and a late top-up is
+//! never followed by a second charge moments later.
 #![no_std]
 
 use soroban_sdk::{
@@ -41,8 +48,16 @@ mod test;
 /// Shortest allowed billing interval. One minute keeps live demos practical
 /// while still ruling out per-ledger drains.
 pub const MIN_INTERVAL_SECONDS: u64 = 60;
-/// Longest allowed billing interval (one leap year).
-pub const MAX_INTERVAL_SECONDS: u64 = 366 * 24 * 60 * 60;
+/// Longest allowed billing interval. Kept well inside the longest allowance a
+/// network permits (~180 days on mainnet), so a policy's second charge never
+/// outlives the allowance granted with its first.
+pub const MAX_INTERVAL_SECONDS: u64 = 90 * 24 * 60 * 60;
+/// Largest safety cap: 100 million USDC at 7 decimals.
+pub const MAX_CAP: i128 = 1_000_000_000_000_000;
+/// A charge later than a tenth of its interval (at most an hour) re-anchors the schedule.
+pub const MAX_GRACE_SECONDS: u64 = 3_600;
+/// An uncovered charge is recorded at most once per this window (capped by the interval).
+pub const FAILURE_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 /// Live entries are topped up to ~120 days whenever they drop below ~30 days.
@@ -58,6 +73,8 @@ enum DataKey {
     NextId,
     Policy(u64),
     Committed(Address),
+    /// Latest allowance expiry granted for a subscriber; never shortened.
+    Expiry(Address),
 }
 
 #[contracttype]
@@ -94,6 +111,8 @@ pub struct Policy {
     pub charges: u32,
     /// Consecutive charges the subscriber could not cover. Reset on success.
     pub failed_attempts: u32,
+    /// When the last uncovered charge was recorded (0 if never).
+    pub last_failed_at: u64,
     pub next_charge_at: u64,
     pub created_at: u64,
     pub status: Status,
@@ -162,6 +181,8 @@ pub struct StatusChanged {
     pub policy_id: u64,
     pub status: Status,
     pub next_charge_at: u64,
+    /// Who changed it: the subscriber, the merchant (cancel), or the contract (completion).
+    pub actor: Address,
 }
 
 #[contract]
@@ -223,10 +244,25 @@ fn check_allowance_expiry(env: &Env, live_until: u32) -> Result<(), Error> {
     Ok(())
 }
 
-/// Set the allowance to exactly what the subscriber's live policies may still charge.
+/// Set the allowance to exactly what the subscriber's live policies may still
+/// charge. The expiry is never shortened: a later, shorter request keeps the
+/// longer expiry already granted, so one policy cannot starve another.
 fn approve_committed(env: &Env, subscriber: &Address, extra: i128, live_until: u32) {
     let amount = checked_add(env, committed(env, subscriber), extra);
+    let key = DataKey::Expiry(subscriber.clone());
+    let granted: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let live_until = live_until.max(granted);
     token_client(env).approve(subscriber, &env.current_contract_address(), &amount, &live_until);
+    env.storage().persistent().set(&key, &live_until);
+    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO.min(env.storage().max_ttl()));
+}
+
+/// The next due time after a successful charge that was due at `due_at`.
+fn next_due(policy: &Policy, due_at: u64, now: u64) -> u64 {
+    let grace = (policy.interval / 10).min(MAX_GRACE_SECONDS);
+    let anchored = due_at + policy.interval;
+    let earliest = now + policy.interval - grace;
+    if anchored >= earliest { anchored } else { earliest }
 }
 
 /// Move a policy to a final state and release what it still had committed.
@@ -236,8 +272,9 @@ fn finalize(env: &Env, policy: &mut Policy, status: Status) {
     set_committed(env, &policy.subscriber, committed(env, &policy.subscriber) - released);
 }
 
-fn publish_status(env: &Env, policy: &Policy) {
-    StatusChanged { policy_id: policy.id, status: policy.status, next_charge_at: policy.next_charge_at }.publish(env);
+fn publish_status(env: &Env, policy: &Policy, actor: &Address) {
+    StatusChanged { policy_id: policy.id, status: policy.status, next_charge_at: policy.next_charge_at, actor: actor.clone() }
+        .publish(env);
 }
 
 #[contractimpl]
@@ -271,11 +308,12 @@ impl PayLoop {
         if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&interval) {
             return Err(Error::InvalidInterval);
         }
-        if cap < amount {
+        if cap < amount || cap > MAX_CAP {
             return Err(Error::InvalidCap);
         }
         let contract = env.current_contract_address();
-        if merchant == subscriber || merchant == contract || subscriber == contract {
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        if merchant == subscriber || merchant == contract || subscriber == contract || merchant == token {
             return Err(Error::InvalidParty);
         }
         check_allowance_expiry(&env, allowance_live_until)?;
@@ -295,6 +333,7 @@ impl PayLoop {
             spent: amount,
             charges: 1,
             failed_attempts: 0,
+            last_failed_at: 0,
             next_charge_at: now + interval,
             created_at: now,
             status: Status::Active,
@@ -324,13 +363,14 @@ impl PayLoop {
         .publish(&env);
         Charged { policy_id: id, due_at: now, amount, spent: policy.spent, charges: 1, next_charge_at: policy.next_charge_at }.publish(&env);
         if policy.status == Status::Completed {
-            publish_status(&env, &policy);
+            publish_status(&env, &policy, &contract);
         }
         Ok(id)
     }
 
     /// Charge a due policy. Permissionless: the terms fix who is paid and how much.
     pub fn charge(env: Env, policy_id: u64) -> Result<ChargeOutcome, Error> {
+        bump_instance(&env);
         let mut policy = load_policy(&env, policy_id);
         if policy.status != Status::Active {
             return Err(Error::NotActive);
@@ -350,9 +390,15 @@ impl PayLoop {
             None
         };
         if let Some(reason) = shortfall {
-            policy.failed_attempts += 1;
-            save_policy(&env, &policy);
-            ChargeFailed { policy_id, due_at: policy.next_charge_at, reason, failed_attempts: policy.failed_attempts }.publish(&env);
+            // Record a failure at most once per window, so repeated calls by
+            // anyone cannot inflate the counter or flood the event stream.
+            let window = policy.interval.min(FAILURE_WINDOW_SECONDS);
+            if policy.last_failed_at == 0 || now >= policy.last_failed_at + window {
+                policy.failed_attempts += 1;
+                policy.last_failed_at = now;
+                save_policy(&env, &policy);
+                ChargeFailed { policy_id, due_at: policy.next_charge_at, reason, failed_attempts: policy.failed_attempts }.publish(&env);
+            }
             return Ok(reason);
         }
 
@@ -361,9 +407,8 @@ impl PayLoop {
         policy.spent = checked_add(&env, policy.spent, policy.amount);
         policy.charges += 1;
         policy.failed_attempts = 0;
-        // Stay on the original schedule, but never back-bill missed periods.
-        let anchored = policy.next_charge_at + policy.interval;
-        policy.next_charge_at = if anchored > now { anchored } else { now + policy.interval };
+        policy.last_failed_at = 0;
+        policy.next_charge_at = next_due(&policy, due_at, now);
         set_committed(&env, &policy.subscriber, committed(&env, &policy.subscriber) - policy.amount);
 
         let completed = policy.cap - policy.spent < policy.amount;
@@ -381,7 +426,7 @@ impl PayLoop {
         }
         .publish(&env);
         if completed {
-            publish_status(&env, &policy);
+            publish_status(&env, &policy, &contract);
         }
         Ok(ChargeOutcome::Charged)
     }
@@ -395,7 +440,8 @@ impl PayLoop {
         }
         policy.status = Status::Paused;
         save_policy(&env, &policy);
-        publish_status(&env, &policy);
+        bump_instance(&env);
+        publish_status(&env, &policy, &policy.subscriber);
         Ok(())
     }
 
@@ -413,23 +459,25 @@ impl PayLoop {
         }
         policy.status = Status::Active;
         save_policy(&env, &policy);
-        publish_status(&env, &policy);
+        bump_instance(&env);
+        publish_status(&env, &policy, &policy.subscriber);
         Ok(())
     }
 
-    /// End a policy for good and shrink the allowance by what it had left.
-    /// The remaining allowance (for other live policies) gets `allowance_live_until`.
-    pub fn revoke(env: Env, policy_id: u64, allowance_live_until: u32) -> Result<(), Error> {
+    /// End a policy for good and release its commitment. It does not touch the
+    /// token allowance, so nothing happening on the subscriber's other policies
+    /// can make revocation fail. This policy can never charge again, and
+    /// `refresh_allowance` trims the leftover allowance.
+    pub fn revoke(env: Env, policy_id: u64) -> Result<(), Error> {
         let mut policy = load_policy(&env, policy_id);
         policy.subscriber.require_auth();
         if matches!(policy.status, Status::Revoked | Status::Completed) {
             return Err(Error::AlreadyFinal);
         }
-        check_allowance_expiry(&env, allowance_live_until)?;
         finalize(&env, &mut policy, Status::Revoked);
-        approve_committed(&env, &policy.subscriber, 0, allowance_live_until);
         save_policy(&env, &policy);
-        publish_status(&env, &policy);
+        bump_instance(&env);
+        publish_status(&env, &policy, &policy.subscriber);
         Ok(())
     }
 
@@ -443,7 +491,8 @@ impl PayLoop {
         }
         finalize(&env, &mut policy, Status::Revoked);
         save_policy(&env, &policy);
-        publish_status(&env, &policy);
+        bump_instance(&env);
+        publish_status(&env, &policy, &policy.merchant);
         Ok(())
     }
 
@@ -454,6 +503,7 @@ impl PayLoop {
         subscriber.require_auth();
         check_allowance_expiry(&env, allowance_live_until)?;
         approve_committed(&env, &subscriber, 0, allowance_live_until);
+        bump_instance(&env);
         Ok(())
     }
 

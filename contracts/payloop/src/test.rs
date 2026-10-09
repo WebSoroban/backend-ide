@@ -178,7 +178,7 @@ fn late_charges_keep_the_schedule_and_never_back_bill() {
     let now = s.env.ledger().timestamp();
     let policy = s.client.get_policy(&id);
     assert_eq!(policy.charges, 3);
-    assert_eq!(policy.next_charge_at, now + MONTH);
+    assert_eq!(policy.next_charge_at, now + MONTH - MAX_GRACE_SECONDS);
     assert_eq!(s.client.try_charge(&id), Err(Ok(Error::NotDue)));
 }
 
@@ -189,6 +189,12 @@ fn uncovered_charge_is_recorded_without_moving_funds() {
     advance(&s.env, MONTH);
 
     assert_eq!(s.client.charge(&id), ChargeOutcome::InsufficientBalance);
+    // Anyone can call charge again, but a failure counts once per window.
+    for _ in 0..20 {
+        assert_eq!(s.client.charge(&id), ChargeOutcome::InsufficientBalance);
+    }
+    assert_eq!(s.client.get_policy(&id).failed_attempts, 1);
+    advance(&s.env, FAILURE_WINDOW_SECONDS);
     assert_eq!(s.client.charge(&id), ChargeOutcome::InsufficientBalance);
     let policy = s.client.get_policy(&id);
     assert_eq!(policy.failed_attempts, 2);
@@ -277,7 +283,7 @@ fn resuming_early_keeps_the_paid_period() {
 // --- revoke / cancel ------------------------------------------------------------
 
 #[test]
-fn revoke_is_final_and_shrinks_the_allowance_to_other_policies() {
+fn revoke_is_final_and_refresh_trims_the_allowance_to_other_policies() {
     let s = setup(200 * USDC);
     let first = s.client.create_policy(&s.subscriber, &s.merchant, &(10 * USDC), &MONTH, &(120 * USDC), &live_until(&s.env));
     let other_merchant = Address::generate(&s.env);
@@ -287,11 +293,14 @@ fn revoke_is_final_and_shrinks_the_allowance_to_other_policies() {
     assert_eq!(s.client.committed(&s.subscriber), 110 * USDC + 45 * USDC);
     assert_eq!(s.token.allowance(&s.subscriber, &s.contract), 155 * USDC);
 
-    s.client.revoke(&first, &live_until(&s.env));
+    s.client.revoke(&first);
     assert_eq!(s.client.get_policy(&first).status, Status::Revoked);
     assert_eq!(s.client.committed(&s.subscriber), 45 * USDC);
+    // Revoke does not touch the allowance; trimming is a separate, optional step.
+    assert_eq!(s.token.allowance(&s.subscriber, &s.contract), 155 * USDC);
+    s.client.refresh_allowance(&s.subscriber, &live_until(&s.env));
     assert_eq!(s.token.allowance(&s.subscriber, &s.contract), 45 * USDC);
-    assert_eq!(s.client.try_revoke(&first, &live_until(&s.env)), Err(Ok(Error::AlreadyFinal)));
+    assert_eq!(s.client.try_revoke(&first), Err(Ok(Error::AlreadyFinal)));
     assert_eq!(s.client.try_resume(&first), Err(Ok(Error::NotPaused)));
 
     advance(&s.env, MONTH);
@@ -307,8 +316,10 @@ fn a_paused_policy_can_be_revoked() {
     let s = setup(100 * USDC);
     let id = s.client.create_policy(&s.subscriber, &s.merchant, &(10 * USDC), &MONTH, &(120 * USDC), &live_until(&s.env));
     s.client.pause(&id);
-    s.client.revoke(&id, &live_until(&s.env));
+    s.client.revoke(&id);
     assert_eq!(s.client.get_policy(&id).status, Status::Revoked);
+    assert_eq!(s.client.committed(&s.subscriber), 0);
+    s.client.refresh_allowance(&s.subscriber, &live_until(&s.env));
     assert_eq!(s.token.allowance(&s.subscriber, &s.contract), 0);
 }
 
@@ -340,13 +351,13 @@ fn only_the_subscriber_can_pause_resume_or_revoke() {
             invoke: &MockAuthInvoke {
                 contract: &s.contract,
                 fn_name: name,
-                args: if name == "pause" { (id,).into_val(&s.env) } else { (id, live_until(&s.env)).into_val(&s.env) },
+                args: (id,).into_val(&s.env),
                 sub_invokes: &[],
             },
         };
         let auths = [auth];
         let client = s.client.mock_auths(&auths);
-        let result = if name == "pause" { client.try_pause(&id).map(|_| ()) } else { client.try_revoke(&id, &live_until(&s.env)).map(|_| ()) };
+        let result = if name == "pause" { client.try_pause(&id).map(|_| ()) } else { client.try_revoke(&id).map(|_| ()) };
         assert!(result.is_err(), "{name} by a non-subscriber must fail");
     }
 
@@ -393,7 +404,7 @@ fn every_state_change_emits_an_event_for_the_indexer() {
     advance(&s.env, MONTH);
     s.client.charge(&id);
     assert_eq!(s.env.events().all().filter_by_contract(&s.contract).events().len(), 1);
-    s.client.revoke(&id, &live_until(&s.env));
+    s.client.revoke(&id);
     assert_eq!(s.env.events().all().filter_by_contract(&s.contract).events().len(), 1);
 }
 
@@ -408,8 +419,7 @@ fn allowance_expiry_is_explicit_and_bounded() {
             Err(Ok(Error::InvalidAllowanceExpiry))
         );
     }
-    let id = s.client.create_policy(&s.subscriber, &s.merchant, &USDC, &MONTH, &(10 * USDC), &live_until(&s.env));
-    assert_eq!(s.client.try_revoke(&id, &too_soon), Err(Ok(Error::InvalidAllowanceExpiry)));
+    s.client.create_policy(&s.subscriber, &s.merchant, &USDC, &MONTH, &(10 * USDC), &live_until(&s.env));
     assert_eq!(s.client.try_refresh_allowance(&s.subscriber, &too_late), Err(Ok(Error::InvalidAllowanceExpiry)));
 }
 
@@ -430,4 +440,72 @@ fn signed_approval_carries_the_exact_expiry() {
             (s.subscriber.clone(), s.contract.clone(), 120 * USDC, expiry).into_val(&s.env),
         ))
     );
+}
+
+// --- security review fixes -----------------------------------------------------
+
+#[test]
+fn late_charges_are_never_followed_by_a_second_charge_moments_later() {
+    let s = setup(100 * USDC);
+    let id = s.client.create_policy(&s.subscriber, &s.merchant, &(10 * USDC), &MONTH, &(120 * USDC), &live_until(&s.env));
+    // Charged one second before the next period would be due.
+    advance(&s.env, 2 * MONTH - 1);
+    s.client.charge(&id);
+    let now = s.env.ledger().timestamp();
+    let next = s.client.get_policy(&id).next_charge_at;
+    assert!(next >= now + MONTH - MAX_GRACE_SECONDS, "consecutive charges stay at least interval - grace apart");
+    advance(&s.env, 1);
+    assert_eq!(s.client.try_charge(&id), Err(Ok(Error::NotDue)));
+}
+
+#[test]
+fn a_late_top_up_does_not_back_bill_the_missed_period() {
+    let s = setup(12 * USDC);
+    let id = s.client.create_policy(&s.subscriber, &s.merchant, &(10 * USDC), &MONTH, &(120 * USDC), &live_until(&s.env));
+    advance(&s.env, MONTH);
+    assert_eq!(s.client.charge(&id), ChargeOutcome::InsufficientBalance);
+    // Topped up near the end of the period: one charge now, the next a full period later.
+    advance(&s.env, MONTH - 60);
+    StellarAssetClient::new(&s.env, &s.token.address).mint(&s.subscriber, &(50 * USDC));
+    assert_eq!(s.client.charge(&id), ChargeOutcome::Charged);
+    advance(&s.env, 120);
+    assert_eq!(s.client.try_charge(&id), Err(Ok(Error::NotDue)));
+    assert_eq!(s.token.balance(&s.merchant), 20 * USDC);
+}
+
+#[test]
+fn merchant_cannot_be_the_token_and_caps_and_intervals_are_bounded() {
+    let s = setup(100 * USDC);
+    let e = live_until(&s.env);
+    assert_eq!(s.client.try_create_policy(&s.subscriber, &s.token.address, &USDC, &MONTH, &(2 * USDC), &e), Err(Ok(Error::InvalidParty)));
+    assert_eq!(s.client.try_create_policy(&s.subscriber, &s.merchant, &USDC, &MONTH, &(MAX_CAP + 1), &e), Err(Ok(Error::InvalidCap)));
+    assert_eq!(s.client.try_create_policy(&s.subscriber, &s.merchant, &USDC, &(91 * 24 * 3600), &(2 * USDC), &e), Err(Ok(Error::InvalidInterval)));
+}
+
+#[test]
+fn a_shorter_expiry_never_shortens_an_existing_allowance() {
+    let s = setup(100 * USDC);
+    let long = s.env.ledger().sequence() + 150 * 17_280;
+    let short = s.env.ledger().sequence() + 2 * 17_280;
+    s.client.create_policy(&s.subscriber, &s.merchant, &USDC, &MONTH, &(10 * USDC), &long);
+    let other = Address::generate(&s.env);
+    let second = s.client.create_policy(&s.subscriber, &other, &USDC, &MONTH, &(10 * USDC), &short);
+    // Well past the short expiry, the first policy's allowance is still live.
+    s.env.ledger().set_sequence_number(s.env.ledger().sequence() + 10 * 17_280);
+    advance(&s.env, MONTH);
+    assert_eq!(s.client.charge(&1), ChargeOutcome::Charged);
+    assert_eq!(s.client.charge(&second), ChargeOutcome::Charged);
+}
+
+#[test]
+fn revocation_cannot_be_blocked_by_charges_on_other_policies() {
+    let s = setup(200 * USDC);
+    let target = s.client.create_policy(&s.subscriber, &s.merchant, &(10 * USDC), &MONTH, &(120 * USDC), &live_until(&s.env));
+    let other = s.client.create_policy(&s.subscriber, &Address::generate(&s.env), &(5 * USDC), &MONTH, &(50 * USDC), &live_until(&s.env));
+    advance(&s.env, MONTH);
+    // A charge lands on the other policy (changing committed) right before the revoke.
+    s.client.charge(&other);
+    s.client.revoke(&target);
+    assert_eq!(s.client.get_policy(&target).status, Status::Revoked);
+    assert_eq!(s.client.committed(&s.subscriber), 40 * USDC);
 }
