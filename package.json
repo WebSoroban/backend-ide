@@ -30,7 +30,11 @@
     "worker:billing:dev": "tsx watch workers/billingWorker.ts",
     "test": "node --import tsx --test tests/*.test.ts packages/websoroban-pay/*.test.ts",
     "build:pay-sdk": "npm --prefix packages/websoroban-pay run build",
-    "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/*.test.ts"
+    "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/*.test.ts",
+    "worker:payloop": "node dist/workers/payloopWorker.js",
+    "worker:payloop:dev": "tsx watch workers/payloopWorker.ts",
+    "payloop:deploy": "tsx scripts/payloop-deploy.ts",
+    "payloop:reconcile": "tsx scripts/payloop-reconcile.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

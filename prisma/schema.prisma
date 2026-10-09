@@ -841,3 +841,74 @@ model ProcessedWebhookEvent {
 
   @@index([source, createdAt])
 }
+
+// ---------------------------------------------------------------------------
+// PayLoop — non-custodial USDC subscriptions. The Soroban contract is the
+// source of truth; these tables are an index of it, rebuilt from contract
+// events and checked by the reconciliation job.
+// ---------------------------------------------------------------------------
+model PayLoopPolicy {
+  id               String    @id @default(cuid())
+  network          String
+  contractId       String
+  policyId         BigInt
+  subscriber       String
+  merchant         String
+  /// Token amounts are i128 stroop strings.
+  amount           String
+  intervalSeconds  Int
+  cap              String
+  spent            String
+  charges          Int
+  failedAttempts   Int
+  nextChargeAt     DateTime
+  chainCreatedAt   DateTime
+  status           String
+  /// Relayer bookkeeping: when it last tried this policy and why it failed.
+  lastAttemptAt    DateTime?
+  lastAttemptError String?
+  syncedLedger     Int
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  chargeLog PayLoopCharge[]
+
+  @@unique([contractId, policyId])
+  @@index([contractId, status, nextChargeAt])
+  @@index([subscriber])
+  @@index([merchant])
+}
+
+model PayLoopCharge {
+  id             String   @id @default(cuid())
+  contractId     String
+  policyId       BigInt
+  /// RPC event id; makes indexing idempotent.
+  eventId        String   @unique
+  txHash         String
+  ledger         Int
+  ledgerClosedAt DateTime
+  /// charged | insufficient_balance | insufficient_allowance
+  outcome        String
+  amount         String
+  chargeNumber   Int?
+  dueAt          DateTime
+  delaySeconds   Int
+  createdAt      DateTime @default(now())
+
+  policy PayLoopPolicy @relation(fields: [contractId, policyId], references: [contractId, policyId], onDelete: Cascade)
+
+  @@index([contractId, policyId, ledger])
+  @@index([contractId, outcome, ledgerClosedAt])
+}
+
+/// Indexer cursor and the single-worker lease for one deployed contract.
+model PayLoopSyncState {
+  contractId String    @id
+  network    String
+  cursor     String?
+  lastLedger Int       @default(0)
+  leaseOwner String?
+  leaseUntil DateTime?
+  updatedAt  DateTime  @updatedAt
+}

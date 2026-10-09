@@ -48,6 +48,25 @@ export const TEMPLATE_CATALOG: Template[] = [
     }
   },
   {
+    id: 'payloop-merchant',
+    name: 'PayLoop merchant',
+    description: 'An Express server that unlocks premium content for customers with an active PayLoop USDC subscription. Wallet sign-in, plan matching, and a live charge watcher included.',
+    category: 'Payments',
+    files: ['src/server.ts', 'src/payloop.ts', 'src/wallet-auth.ts', 'src/config.ts', 'scripts/watch-charges.ts', 'package.json', 'tsconfig.json', '.env.example', 'README.md'],
+    price: 0,
+    documentation: {
+      summary: 'Accept non-custodial recurring USDC payments without running chain infrastructure. Customers sign one PayLoop policy from their own wallet; WebSoroban\'s relayer charges it on schedule. This server verifies wallet ownership with a signed message and grants access only while the customer holds an active policy paying your address the plan amount on the plan interval.',
+      usage: 'Set MERCHANT_ADDRESS and your plan in .env, run pnpm install and pnpm dev, then subscribe from the WebSoroban PayLoop page with a testnet wallet. POST /api/premium returns 200 for active subscribers and 402 with a subscribe link otherwise. Run pnpm watch-charges to see payments as they settle.',
+      functions: [
+        { name: 'GET /api/challenge', params: ['wallet'], returns: '{ message }', description: 'A timestamped message for the customer to sign with their wallet.' },
+        { name: 'POST /api/premium', params: ['wallet', 'message', 'signature'], returns: '200 content, 402 subscription_required, or 401', description: 'Verifies wallet ownership, then checks for an active policy that matches the plan.' },
+        { name: 'GET /api/subscribers', params: [], returns: '{ count, policies }', description: 'Every active subscription paying the merchant address.' },
+        { name: 'activeSubscription', params: ['subscriber'], returns: 'Policy | null', description: 'Plan-matching active policy lookup, comparing amounts in stroops.' }
+      ],
+      readMore: 'The PayLoop contract enforces the merchant, amount, interval, and safety cap on-chain, and subscribers can pause or revoke at any time, so access checks run on every request rather than being cached. See the PayLoop guide in the docs for the custody model.'
+    }
+  },
+  {
     id: 'counter-mf',
     name: 'Counter (multi-file)',
     description: 'A persistent counter split across modules — the contract entrypoint in src/lib.rs, instance storage in src/storage.rs, and event publishing in src/events.rs — with a unit test and an integration test. A clean starting point for a real multi-file project.',

@@ -1,0 +1,4 @@
+target/
+test_snapshots/
+# Commit the lockfile so the deployed wasm hash is reproducible.
+!Cargo.lock

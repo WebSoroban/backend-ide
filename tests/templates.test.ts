@@ -36,3 +36,18 @@ test('Paid API endpoint is a free, complete scaffold', () => {
   assert.ok(!files.get('README.md')!.includes('\\`'), 'README must not contain escaped backticks');
   assert.doesNotMatch(files.get('.env.example')!, /28076b0b-57cd-42b1-9cbc-b386e762c1dc/);
 });
+
+test('PayLoop merchant is a free, complete scaffold', () => {
+  const template = getTemplateById('payloop-merchant');
+  const bundle = getBundle('payloop-merchant');
+  assert.ok(template);
+  assert.ok(bundle);
+  assert.equal(template.category, 'Payments');
+  assert.ok(FREE_TEMPLATE_IDS.includes(template.id));
+  const files = new Map(bundle.files.map((file) => [file.path, file.content]));
+  for (const path of template.files) assert.ok(files.has(path), `missing scaffold file: ${path}`);
+  assert.match(files.get('src/wallet-auth.ts')!, /Stellar Signed Message:\\n/);
+  assert.match(files.get('src/payloop.ts')!, /policy\.merchant === config\.merchant/);
+  assert.match(files.get('src/server.ts')!, /status\(402\)/);
+  assert.ok(!files.get('README.md')!.includes('\\`'), 'README must not contain escaped backticks');
+});

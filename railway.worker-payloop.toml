@@ -1,0 +1,21 @@
+# Railway config for the PAYLOOP worker service (indexer + charge relayer).
+#
+# Runs workers/payloopWorker.ts: indexes PayLoop contract events into Postgres
+# and submits due `charge` calls from the relayer account. Only one replica
+# submits at a time (a database lease), so extra replicas add availability.
+#
+# Needs the SAME DATABASE_URL/DIRECT_URL as the API, plus:
+#   PAYLOOP_NETWORK=testnet
+#   PAYLOOP_RELAYER_SECRET   fee-paying account; holds no customer funds
+#   PAYLOOP_CONTRACT_ID      optional; defaults to contracts/payloop/deployments/<network>.json
+#
+# Service → Settings → Config-as-code → Railway Config File = railway.worker-payloop.toml
+# No healthcheckPath: workers don't run an HTTP server.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfiles/Dockerfile.billing"
+
+[deploy]
+startCommand = "node dist/workers/payloopWorker.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

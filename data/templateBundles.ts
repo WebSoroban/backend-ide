@@ -1039,8 +1039,352 @@ dist/
   ]
 };
 
+// ---------------------------------------------------------------------------
+// PayLoop merchant — gate content behind an active PayLoop subscription.
+// ---------------------------------------------------------------------------
+const PAYLOOP_MERCHANT: TemplateBundle = {
+  manifestPath: 'package.json',
+  files: [
+    {
+      path: 'package.json',
+      content: `{
+  "name": "payloop-merchant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "watch-charges": "tsx --env-file=.env scripts/watch-charges.ts",
+    "build": "tsc",
+    "start": "node --env-file=.env dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.6.1",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+`
+    },
+    {
+      path: 'tsconfig.json',
+      content: `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}
+`
+    },
+    {
+      path: '.env.example',
+      content: `# WebSoroban API that indexes PayLoop policies and charges.
+PAYLOOP_API_URL=https://backend-ide-production.up.railway.app/api
+# The Stellar address your subscribers pay. It needs a USDC trustline.
+MERCHANT_ADDRESS=G_REPLACE_WITH_YOUR_MERCHANT_ADDRESS
+# The plan a subscriber must hold: amount per charge and billing interval.
+PLAN_AMOUNT_USDC=0.1
+PLAN_INTERVAL_SECONDS=60
+# Where customers subscribe (the WebSoroban PayLoop page or your own checkout).
+SUBSCRIBE_URL=https://websoroban.in/payloop
+PORT=8788
+`
+    },
+    {
+      path: 'src/config.ts',
+      content: `function required(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(\`Missing \${name}. Copy .env.example to .env and fill it in.\`);
+  return value;
+}
+
+export const config = {
+  port: Number(process.env.PORT || 8788),
+  apiUrl: (process.env.PAYLOOP_API_URL || 'https://backend-ide-production.up.railway.app/api').replace(/\\/$/, ''),
+  merchant: required('MERCHANT_ADDRESS'),
+  planAmountUsdc: required('PLAN_AMOUNT_USDC'),
+  planIntervalSeconds: Number(required('PLAN_INTERVAL_SECONDS')),
+  subscribeUrl: process.env.SUBSCRIBE_URL || 'https://websoroban.in/payloop',
+};
+`
+    },
+    {
+      path: 'src/payloop.ts',
+      content: `import { config } from './config.js';
+
+export interface Policy {
+  policyId: string;
+  subscriber: string;
+  merchant: string;
+  amount: string;
+  amountUsdc: string;
+  intervalSeconds: number;
+  spentUsdc: string;
+  capUsdc: string;
+  charges: number;
+  failedAttempts: number;
+  nextChargeAt: string;
+  status: 'active' | 'paused' | 'revoked' | 'completed';
+}
+
+/** USDC has 7 decimals on Stellar; compare plan amounts in stroops, never floats. */
+export function toStroops(usdc: string): bigint {
+  const [whole, fraction = ''] = usdc.trim().split('.');
+  return BigInt(whole) * 10_000_000n + BigInt(fraction.padEnd(7, '0').slice(0, 7));
+}
+
+async function get<T>(path: string): Promise<T> {
+  const response = await fetch(\`\${config.apiUrl}\${path}\`, { signal: AbortSignal.timeout(10_000) });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error((body as { error?: string }).error || \`PayLoop API returned HTTP \${response.status}.\`);
+  return body as T;
+}
+
+export async function merchantPolicies(status?: Policy['status']): Promise<Policy[]> {
+  const query = new URLSearchParams({ merchant: config.merchant, ...(status ? { status } : {}) });
+  return (await get<{ policies: Policy[] }>(\`/payloop/policies?\${query}\`)).policies;
+}
+
+/**
+ * The subscriber's active policy for this merchant's plan, or null.
+ * A policy counts only if it pays this merchant the plan amount on the plan interval.
+ */
+export async function activeSubscription(subscriber: string): Promise<Policy | null> {
+  const query = new URLSearchParams({ subscriber, status: 'active' });
+  const { policies } = await get<{ policies: Policy[] }>(\`/payloop/policies?\${query}\`);
+  const amount = toStroops(config.planAmountUsdc);
+  return policies.find((policy) =>
+    policy.merchant === config.merchant &&
+    BigInt(policy.amount) === amount &&
+    policy.intervalSeconds === config.planIntervalSeconds,
+  ) || null;
+}
+`
+    },
+    {
+      path: 'src/wallet-auth.ts',
+      content: `import { Keypair, StrKey, hash } from '@stellar/stellar-sdk';
+
+/**
+ * Proof that a customer controls a Stellar wallet: they sign a short,
+ * timestamped message with SEP-53 \`signMessage\` (supported by Freighter).
+ */
+const PREFIX = 'Stellar Signed Message:\\n';
+const MAX_AGE_SECONDS = 300;
+const seen = new Map<string, number>();
+
+export function challengeFor(wallet: string, now = Date.now()): string {
+  return \`Sign in to PayLoop merchant as \${wallet} at \${Math.floor(now / 1000)}\`;
+}
+
+export function verifyWalletSignature(wallet: string, message: string, signatureBase64: string, now = Date.now()): string | null {
+  if (!StrKey.isValidEd25519PublicKey(wallet)) return 'Use a Stellar G-address.';
+  const match = message.match(/^Sign in to PayLoop merchant as (G[A-Z2-7]{55}) at (\\d+)$/);
+  if (!match || match[1] !== wallet) return 'The message does not match this wallet.';
+  const age = now / 1000 - Number(match[2]);
+  if (age < -30 || age > MAX_AGE_SECONDS) return 'The sign-in message expired. Request a new one.';
+  const signature = Buffer.from(signatureBase64, 'base64');
+  const digest = hash(Buffer.from(PREFIX + message, 'utf8'));
+  if (signature.length !== 64 || !Keypair.fromPublicKey(wallet).verify(digest, signature)) return 'The signature is not valid for this wallet.';
+  // Each signed message works once inside its validity window.
+  const key = \`\${wallet}:\${signatureBase64}\`;
+  if (seen.has(key)) return 'This signature was already used.';
+  seen.set(key, now);
+  for (const [entry, at] of seen) if (now - at > MAX_AGE_SECONDS * 1000) seen.delete(entry);
+  return null;
+}
+`
+    },
+    {
+      path: 'src/server.ts',
+      content: `import express from 'express';
+import { config } from './config.js';
+import { activeSubscription, merchantPolicies } from './payloop.js';
+import { challengeFor, verifyWalletSignature } from './wallet-auth.js';
+
+const app = express();
+app.use(express.json());
+
+app.get('/health', (_request, response) => {
+  response.json({ ok: true, merchant: config.merchant });
+});
+
+// 1. The customer asks for a message to sign with their wallet.
+app.get('/api/challenge', (request, response) => {
+  const wallet = String(request.query.wallet || '');
+  response.json({ message: challengeFor(wallet) });
+});
+
+// 2. They send it back signed; access depends on an active PayLoop policy.
+app.post('/api/premium', async (request, response) => {
+  const { wallet, message, signature } = request.body as { wallet?: string; message?: string; signature?: string };
+  const problem = verifyWalletSignature(String(wallet || ''), String(message || ''), String(signature || ''));
+  if (problem) return response.status(401).json({ error: 'wallet_not_verified', message: problem });
+
+  try {
+    const policy = await activeSubscription(String(wallet));
+    if (!policy) {
+      return response.status(402).json({
+        error: 'subscription_required',
+        message: \`Subscribe for \${config.planAmountUsdc} USDC every \${config.planIntervalSeconds}s to unlock this content.\`,
+        subscribe: config.subscribeUrl,
+        merchant: config.merchant,
+      });
+    }
+    response.json({
+      content: 'Premium content for active subscribers.',
+      subscription: { policyId: policy.policyId, nextChargeAt: policy.nextChargeAt, charges: policy.charges },
+    });
+  } catch (error) {
+    response.status(503).json({ error: 'payloop_unavailable', message: error instanceof Error ? error.message : 'PayLoop API unavailable.' });
+  }
+});
+
+// Merchant dashboard data: every active subscription paying this address.
+app.get('/api/subscribers', async (_request, response) => {
+  try {
+    const policies = await merchantPolicies('active');
+    response.json({ count: policies.length, policies });
+  } catch (error) {
+    response.status(503).json({ error: error instanceof Error ? error.message : 'PayLoop API unavailable.' });
+  }
+});
+
+app.listen(config.port, () => {
+  console.log(\`PayLoop merchant listening on http://localhost:\${config.port}\`);
+  console.log(\`Plan: \${config.planAmountUsdc} USDC every \${config.planIntervalSeconds}s to \${config.merchant}\`);
+});
+`
+    },
+    {
+      path: 'scripts/watch-charges.ts',
+      content: `// Print every new PayLoop charge to this merchant as the relayer settles it.
+import { merchantPolicies, type Policy } from '../src/payloop.js';
+
+const seen = new Map<string, number>();
+const POLL_MS = 15_000;
+
+async function poll(first: boolean) {
+  const policies: Policy[] = await merchantPolicies();
+  for (const policy of policies) {
+    const previous = seen.get(policy.policyId);
+    if (!first && previous !== undefined && policy.charges > previous) {
+      console.log(\`\${new Date().toISOString()} policy #\${policy.policyId} paid \${policy.amountUsdc} USDC (charge \${policy.charges}, total \${policy.spentUsdc}/\${policy.capUsdc})\`);
+    } else if (!first && previous === undefined) {
+      console.log(\`\${new Date().toISOString()} new subscriber \${policy.subscriber} on policy #\${policy.policyId} (\${policy.status})\`);
+    }
+    if (!first && policy.failedAttempts > 0 && previous === policy.charges) {
+      console.log(\`\${new Date().toISOString()} policy #\${policy.policyId} could not be charged (\${policy.failedAttempts} attempts); the relayer retries\`);
+    }
+    seen.set(policy.policyId, policy.charges);
+  }
+  if (first) console.log(\`Watching \${policies.length} policies…\`);
+}
+
+await poll(true);
+setInterval(() => poll(false).catch((error) => console.error(error instanceof Error ? error.message : error)), POLL_MS);
+`
+    },
+    {
+      path: 'README.md',
+      content: `# PayLoop merchant
+
+Gate content behind a non-custodial USDC subscription. Customers subscribe with
+PayLoop: one signed policy pays you a fixed USDC amount on a fixed interval
+from their own wallet. This server checks for an active policy before it
+serves premium content. You run no chain infrastructure: WebSoroban's relayer
+submits the charges and its indexer serves the policies.
+
+## 1. Configure
+
+\`\`\`bash
+cp .env.example .env
+\`\`\`
+
+- \`MERCHANT_ADDRESS\`: the Stellar address you get paid at. It needs a USDC trustline.
+- \`PLAN_AMOUNT_USDC\` and \`PLAN_INTERVAL_SECONDS\`: the plan a customer must hold.
+  \`0.1\` every \`60\` seconds is a good testnet demo; production plans are usually
+  monthly (\`2592000\`).
+
+\`\`\`bash
+pnpm install
+pnpm dev
+\`\`\`
+
+## 2. Subscribe as a customer
+
+Open the WebSoroban **PayLoop** page on testnet, connect a wallet, fund it with
+test USDC, and sign a policy to your \`MERCHANT_ADDRESS\` with the plan amount
+and interval. The first charge settles immediately.
+
+## 3. Unlock premium content
+
+The customer proves wallet ownership by signing a short message (SEP-53
+\`signMessage\`, supported by Freighter):
+
+\`\`\`bash
+curl "http://localhost:8788/api/challenge?wallet=G…CUSTOMER"
+# sign the returned message in the wallet, then:
+curl -X POST http://localhost:8788/api/premium \\
+  -H 'Content-Type: application/json' \\
+  -d '{"wallet":"G…CUSTOMER","message":"…","signature":"<base64>"}'
+\`\`\`
+
+- \`200\`: the wallet holds an active policy for your plan.
+- \`402 subscription_required\`: no matching active policy. The response links to the subscribe page.
+- \`401 wallet_not_verified\`: the signature is missing, wrong, reused, or older than five minutes.
+
+## 4. Watch payments arrive
+
+\`\`\`bash
+pnpm watch-charges
+\`\`\`
+
+This prints each charge as the relayer settles it, new subscribers, and any
+charge a subscriber could not cover. The relayer retries those automatically
+with backoff. \`GET /api/subscribers\` lists every active subscription paying you.
+
+## How access stays correct
+
+- A policy counts only if it pays **your** address the **plan amount** on the
+  **plan interval**. Amounts are compared in stroops, never floats.
+- Customers can pause or revoke at any time from their wallet. A paused or
+  revoked policy stops granting access on the next request.
+- The contract enforces the amount, schedule, and safety cap on-chain. Nobody,
+  including WebSoroban, can charge a customer more than they signed for.
+`
+    },
+    {
+      path: '.gitignore',
+      content: `node_modules/
+.env
+dist/
+`
+    }
+  ]
+};
+
 export const TEMPLATE_BUNDLES: Record<string, TemplateBundle> = {
   'paid-api-endpoint': PAID_API_ENDPOINT,
+  'payloop-merchant': PAYLOOP_MERCHANT,
   'counter-mf': COUNTER_MF,
   'access-control-mf': ACCESS_CONTROL_MF,
   'token-mf': TOKEN_MF,
