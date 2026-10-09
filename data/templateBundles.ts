@@ -747,7 +747,7 @@ const PAID_API_ENDPOINT: TemplateBundle = {
     {
       path: '.env.example',
       content: `# Copy this file to .env. Create the endpoint in WebSoroban Payment Studio.
-WEBSOROBAN_API_URL=https://backend-ide-production.up.railway.app/api
+WEBSOROBAN_API_URL=https://backend-ide-production-003a.up.railway.app/api
 WEBSOROBAN_ENDPOINT_ID=replace_with_endpoint_id
 # wsp_test_… settles on Stellar testnet, wsp_live_… on mainnet.
 WEBSOROBAN_PAY_KEY=replace_with_scoped_endpoint_key
@@ -769,7 +769,7 @@ PAYER_SECRET=
 
 export const config = {
   port: Number(process.env.PORT || 8787),
-  apiUrl: process.env.WEBSOROBAN_API_URL || 'https://backend-ide-production.up.railway.app/api',
+  apiUrl: process.env.WEBSOROBAN_API_URL || 'https://backend-ide-production-003a.up.railway.app/api',
   endpointId: required('WEBSOROBAN_ENDPOINT_ID'),
   apiKey: required('WEBSOROBAN_PAY_KEY'),
   payTo: required('STELLAR_PAY_TO'),
@@ -1097,7 +1097,7 @@ const PAYLOOP_MERCHANT: TemplateBundle = {
     {
       path: '.env.example',
       content: `# WebSoroban API that indexes PayLoop policies and charges.
-PAYLOOP_API_URL=https://backend-ide-production.up.railway.app/api
+PAYLOOP_API_URL=https://backend-ide-production-003a.up.railway.app/api
 # The Stellar address your subscribers pay. It needs a USDC trustline.
 MERCHANT_ADDRESS=G_REPLACE_WITH_YOUR_MERCHANT_ADDRESS
 # The plan a subscriber must hold: amount per charge and billing interval.
@@ -1118,7 +1118,7 @@ PORT=8788
 
 export const config = {
   port: Number(process.env.PORT || 8788),
-  apiUrl: (process.env.PAYLOOP_API_URL || 'https://backend-ide-production.up.railway.app/api').replace(/\\/$/, ''),
+  apiUrl: (process.env.PAYLOOP_API_URL || 'https://backend-ide-production-003a.up.railway.app/api').replace(/\\/$/, ''),
   merchant: required('MERCHANT_ADDRESS'),
   planAmountUsdc: required('PLAN_AMOUNT_USDC'),
   planIntervalSeconds: Number(required('PLAN_INTERVAL_SECONDS')),

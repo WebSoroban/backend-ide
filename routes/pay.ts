@@ -58,7 +58,7 @@ const railwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
 const defaultPublicApiBase = railwayPublicDomain
   ? `https://${railwayPublicDomain}/api`
   : process.env.NODE_ENV === 'production'
-    ? 'https://backend-ide-production.up.railway.app/api'
+    ? 'https://backend-ide-production-003a.up.railway.app/api'
     : 'http://localhost:3001/api';
 const PUBLIC_API_BASE = (process.env.PUBLIC_API_URL?.trim() || defaultPublicApiBase).replace(/\/$/, '');
 const FRONTEND_BASE = (
