@@ -37,14 +37,16 @@ export interface RateLimitOptions {
   max: number;
   /** namespace so different routes don't share a counter */
   prefix: string;
+  /** counter key; defaults to the authenticated user, then the client IP */
+  keyFor?: (req: Request) => string | undefined;
 }
 
-export function rateLimit({ windowSec, max, prefix }: RateLimitOptions) {
+export function rateLimit({ windowSec, max, prefix, keyFor }: RateLimitOptions) {
   return async function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
     const redis = getClient();
     if (!redis) return next(); // fail-open
 
-    const id = req.userId || req.ip || 'anon';
+    const id = keyFor?.(req) || req.userId || req.ip || 'anon';
     const key = `rl:${prefix}:${id}`;
     try {
       const count = await redis.incr(key);
@@ -69,6 +71,13 @@ export function rateLimit({ windowSec, max, prefix }: RateLimitOptions) {
       return next(); // fail-open
     }
   };
+}
+
+/** Close the shared Redis connection (for graceful shutdown and tests). */
+export async function closeRateLimitClient() {
+  const current = client;
+  client = null;
+  if (current) await current.quit().catch(() => current.disconnect());
 }
 
 export default rateLimit;

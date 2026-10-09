@@ -1,16 +1,36 @@
 {
   "name": "@websoroban/pay",
-  "version": "0.1.0",
-  "private": true,
-  "description": "WebSoroban managed x402 middleware for Stellar testnet",
-  "main": "index.ts",
+  "version": "0.2.0",
+  "description": "x402 payments for Express APIs, settled in USDC on Stellar through WebSoroban's managed facilitator",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "x402",
+    "stellar",
+    "soroban",
+    "usdc",
+    "payments",
+    "express"
+  ],
   "peerDependencies": {
     "@x402/core": "^2.25.0",
     "@x402/express": "^2.25.0",
     "@x402/stellar": "^2.25.0",
-    "express": "^4.18.0"
+    "express": "^4.18.0 || ^5.0.0"
   },
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

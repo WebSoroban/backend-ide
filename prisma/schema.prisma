@@ -353,7 +353,8 @@ model Payment {
 // ---------------------------------------------------------------------------
 // WebSoroban Pay — hosted x402 endpoints and their append-only request trail.
 // API keys are stored as SHA-256 digests; the plaintext key is returned once.
-// MVP is deliberately restricted to Stellar testnet + USDC.
+// Settles USDC on stellar:testnet, and on stellar:pubnet when the operator
+// configures a mainnet facilitator.
 // ---------------------------------------------------------------------------
 model X402Endpoint {
   id           String   @id @default(cuid())
@@ -406,7 +407,7 @@ model X402Event {
   @@index([transaction])
 }
 
-// Developer-registered callbacks for settled and failed testnet payments.
+// Developer-registered callbacks for settled and failed payments.
 // The signing secret is encrypted at rest and returned once at creation.
 model X402Webhook {
   id              String   @id @default(cuid())
@@ -438,6 +439,7 @@ model X402WebhookDelivery {
   nextAttemptAt  DateTime?
   lastStatusCode Int?
   lastError      String?
+  deliveredAt    DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -467,12 +469,31 @@ model X402AgentWallet {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  endpoint X402Endpoint? @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  user         User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint     X402Endpoint?           @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  reservations X402SpendReservation[]
 
   @@index([userId, createdAt])
   @@index([publicKey])
   @@index([endpointId])
+}
+
+// Spend held against an agent wallet while one payment settles. Keyed by the
+// payment fingerprint so a retried settle is idempotent and the outcome can be
+// committed or released by any API instance.
+model X402SpendReservation {
+  id              String   @id @default(cuid())
+  walletId        String
+  fingerprint     String   @unique
+  amountStroops   String
+  windowStartedAt DateTime
+  status          String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  wallet X402AgentWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, status])
 }
 
 // ---------------------------------------------------------------------------

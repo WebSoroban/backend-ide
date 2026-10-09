@@ -23,12 +23,13 @@ test('normalizes positive USDC prices with Stellar precision', () => {
   assert.throws(() => normalizeUsdPrice('0.12345678'), /up to 7 decimal/);
 });
 
-test('creates scoped keys while storing only deterministic hashes', () => {
+test('creates network-scoped keys while storing only deterministic hashes', () => {
   const key = createEndpointApiKey();
   assert.match(key.raw, /^wsp_test_/);
   assert.equal(key.hash, hashEndpointApiKey(key.raw));
   assert.notEqual(key.hash, key.raw);
   assert.match(key.prefix, /^wsp_test_/);
+  assert.match(createEndpointApiKey('stellar:pubnet').raw, /^wsp_live_/);
 });
 
 test('extracts encoded endpoint slugs from resource paths', () => {
@@ -49,9 +50,9 @@ test('maps facilitator failures to stable product errors', () => {
   assert.equal(normalizeX402Error(new Error('insufficient balance')).code, 'INSUFFICIENT_BALANCE_OR_ALLOWANCE');
   assert.equal(normalizeX402Error(new Error('invalid signature')).code, 'INVALID_SIGNATURE');
   assert.equal(normalizeX402Error(new Error('unsupported wallet')).code, 'UNSUPPORTED_WALLET');
-  assert.match(normalizeX402Error(new Error('insufficient balance')).fix, /testnet USDC/);
+  assert.match(normalizeX402Error(new Error('insufficient balance')).fix, /USDC trustline/);
 });
 
 test('rejects invalid Stellar payout addresses', () => {
-  assert.throws(() => validatePayoutAddress('not-a-stellar-address'), /valid Stellar G-address/);
+  assert.throws(() => validatePayoutAddress('not-a-stellar-address'), /valid Stellar address/);
 });

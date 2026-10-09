@@ -1,11 +1,12 @@
-# WebSoroban Pay MVP
+# WebSoroban Pay
 
-WebSoroban Pay turns an Express endpoint into an official x402 v2 resource on Stellar testnet. The MVP supports the exact payment scheme and USDC-denominated prices, with a managed facilitator proxy and an activity trail for payment challenges, verification, settlement, and failures.
+WebSoroban Pay turns an Express endpoint into an official x402 v2 resource that settles USDC on Stellar. It supports the `exact` scheme on **Stellar testnet** by default and on **Stellar mainnet** when an operator configures a mainnet facilitator. Every challenge, verification, settlement, and failure is recorded for Payment Studio, signed webhooks, and settlement reliability metrics.
 
 ## Runtime requirements
 
 - Node.js 22 or newer (required by `@x402/stellar`)
-- PostgreSQL with the Prisma migration applied
+- PostgreSQL with every Prisma migration applied
+- Redis (shared rate limits; the limiter fails open if Redis is down)
 - A public HTTPS API URL for usable payment challenge URLs
 
 ## Configure
@@ -13,104 +14,126 @@ WebSoroban Pay turns an Express endpoint into an official x402 v2 resource on St
 ```env
 PUBLIC_API_URL=https://api.example.com/api
 
-# Recommended: OpenZeppelin Channels testnet facilitator
+# Testnet. Recommended: OpenZeppelin Channels.
 X402_FACILITATOR_URL=https://channels.openzeppelin.com/x402/testnet
 X402_FACILITATOR_API_KEY=your_relayer_api_key
+
+# Mainnet (optional). Enabled only when BOTH are set; there is no public fallback.
+X402_MAINNET_FACILITATOR_URL=
+X402_MAINNET_FACILITATOR_API_KEY=
+MAINNET_HORIZON_URL=https://horizon.stellar.org
 ```
 
-When no facilitator API key is configured, the server falls back to the public `https://www.x402.org/facilitator` testnet service. This fallback is suitable for development, not an availability guarantee.
+With no testnet facilitator key, the server falls back to the public `https://www.x402.org/facilitator` testnet service. That is fine for development but is not an availability guarantee.
 
 Apply the schema and build:
 
 ```bash
 npm run migrate:deploy
 npm run build
+npm run build:pay-sdk   # compiles packages/websoroban-pay to dist/
 ```
+
+## Networks
+
+| | Testnet | Mainnet |
+|---|---|---|
+| CAIP-2 id | `stellar:testnet` | `stellar:pubnet` |
+| Endpoint key prefix | `wsp_test_` | `wsp_live_` |
+| Hosted resource | `/api/pay/resource/:slug` | `/api/pay/live/resource/:slug` |
+| USDC issuer | `GBBD47IF…LFLA5` | `GA5ZSEJY…KZVN` (Circle) |
+
+Each network runs its own x402 resource server and talks to exactly one facilitator, so a testnet facilitator can never be asked to settle mainnet funds. The SDK infers the network from the key prefix and refuses a mismatched `network` option. The proxy rejects any payment whose requirements name a different network (`NETWORK_MISMATCH`).
 
 ## Product flow
 
 1. Sign in and open `/pay` in the frontend.
-2. Create a route with a name, slug, price, response, and Stellar testnet payout G-address.
+2. Pick a network, then create a route with a name, slug, price, response, and payout address. The studio checks that the payout address exists and holds a USDC trustline; creation is refused if it cannot receive USDC.
 3. Copy the endpoint key. Only its SHA-256 hash is stored.
-4. Send the built-in test request and confirm the HTTP 402 response exposes `PAYMENT-REQUIRED`.
-5. Open **Pay with Freighter**, connect a testnet account holding testnet USDC, and approve the exact authorization.
-6. Confirm the checkout displays the settlement transaction and Stellar Expert receipt link.
-7. Add `@websoroban/pay` to an Express service using the generated snippet when protecting an external service.
-8. Verification and settlement events appear in Payment Studio.
+4. **Inspect 402** to confirm the challenge exposes `PAYMENT-REQUIRED`.
+5. Open the hosted checkout, connect Freighter, Hana, HOT, or Klever, and approve the exact authorization. The checkout checks the payer's USDC trustline before asking for a signature.
+6. The checkout shows the settlement transaction and its Stellar Expert receipt.
+7. Protect your own Express service with `@websoroban/pay` using the generated snippet.
+8. Settlement success rate, failure reasons with fixes, and webhook delivery state appear in Payment Studio.
 
-The public checkout lives at `/pay/checkout?resource=<encoded-resource-url>` and
-does not require a WebSoroban login. The facilitator sponsors transaction fees;
-the buyer authorizes only the exact USDC transfer.
+The public checkout lives at `/pay/checkout?resource=<encoded-resource-url>` and needs no WebSoroban login. The facilitator sponsors transaction fees; the buyer authorizes only the exact USDC transfer.
 
-## Browser client
+## Wallets
 
-Use mutually compatible x402 and Freighter packages:
+x402 on Stellar needs a wallet that signs Soroban **authorization entries**.
 
-```bash
-npm install @x402/core@^2.25.0 @x402/fetch@^2.25.0 \
-  @x402/stellar@^2.25.0 @stellar/freighter-api@^6.0.1
-```
+| Wallet | Auth entries | Hosted checkout |
+|---|---|---|
+| Freighter (extension) | Yes | Yes |
+| Hana | Yes | Yes |
+| HOT | Yes | Yes |
+| Klever | Yes | Yes |
+| Albedo | Yes | No: Stellar Wallets Kit 1.9's Albedo module rejects `signAuthEntry`; sign from your own client |
+| OneKey | Yes | No: no Wallets Kit module; sign from your own client |
+| Freighter Mobile | No | No |
 
-`@stellar/freighter-api` 4.1 is not compatible with current Freighter extension
-auth-signature transport. The checkout uses 6.0.1 and verifies the returned
-Ed25519 signature against the exact authorization preimage before submitting it.
+The checkout verifies every returned signature against the exact authorization preimage and the connected account before submitting it. `GET /api/pay/wallets` and the SDK's `AUTH_ENTRY_WALLETS` publish the same list.
 
-For cross-origin browser clients, allow and expose the x402 headers:
+## Settlement reliability
+
+`GET /api/pay/overview` returns `metrics.settlement` for 24h, 7d, and 30d windows:
+
+- `successRate = settled / (settled + facilitator failures)`
+- Failures that never reach the facilitator (spend caps, rate limits, network mismatches, disabled networks) are excluded from the rate but still listed in `failureReasons`, each with its cause and fix.
+
+Facilitator reasons such as `insufficient_funds` or `invalid_exact_stellar_payload_*` are mapped onto the catalog in `services/x402Errors.ts`; unknown reasons keep their raw code.
+
+## Webhooks
+
+Register `payment.settled`, `payment.failed`, or `wallet.spend_limit_exceeded`. Deliveries are signed `t=<unix>,v1=<hmac>` over `${timestamp}.${rawBody}` in `X-WebSoroban-Signature`, with `X-WebSoroban-Delivery` and `X-WebSoroban-Event`. Verify with the SDK:
 
 ```ts
-cors({
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'PAYMENT-SIGNATURE',
-    'X-PAYMENT',
-    'Access-Control-Expose-Headers', // emitted by @x402/fetch 2.25 paid retries
-  ],
-  exposedHeaders: [
-    'PAYMENT-REQUIRED',
-    'PAYMENT-RESPONSE',
-    'PAYMENT-ERROR',
-    'X-PAYMENT-RESPONSE',
-  ],
+import { constructWebhookEvent } from '@websoroban/pay';
+
+app.post('/webhooks/pay', express.raw({ type: 'application/json' }), (req, res) => {
+  const event = constructWebhookEvent(process.env.WEBSOROBAN_WEBHOOK_SECRET!, req.header('X-WebSoroban-Signature'), req.body);
+  // event.id is stable per payment event; use it to deduplicate.
+  res.sendStatus(204);
 });
 ```
 
-WebSoroban's checkout removes the unnecessary `Access-Control-Expose-Headers`
-request header, while the backend accepts it for compatibility with stock
-`@x402/fetch` browser clients.
+Delivery is durable. Each delivery is stored in Postgres, attempted immediately, then retried after 10s, 1m, 5m, 30m, and 2h before it is marked `failed`. Any API instance can pick up due retries: a delivery is claimed with a conditional update, so it is sent at most once per attempt even with several instances running. Redirects are not followed, and targets must be public HTTPS (`http://localhost` is allowed outside production). `POST /api/pay/webhooks/:id/test` sends a signed `webhook.test` delivery.
 
-## Local end-to-end test
+## Agent spend limits
 
-1. Start the backend on `http://localhost:3001` and frontend on
-   `http://localhost:3000`.
-2. Apply the Prisma migration with `npm run migrate:deploy`.
-3. Open `/pay`, create an endpoint, and select **Pay with Freighter**.
-4. Set Freighter to Testnet and use an account funded with testnet USDC.
-5. Approve the authorization once.
-6. Confirm the protected request returns HTTP `200`, `PAYMENT-RESPONSE` is
-   readable by the browser, and the receipt opens the testnet transaction.
+An agent wallet caps a signer's daily USDC spend (`spendingLimitStroops`, `periodLedgers` ≈ 17280). The payer is read from the signed Stellar transfer itself, not from client-echoed fields. Before settlement the cap is reserved under a row lock, so concurrent payments cannot slip past it. The reservation is keyed by the payment fingerprint, which makes retries idempotent. It is committed on success and released on failure. A payment over the cap never reaches the facilitator.
 
-The initial HTTP `402` is expected. A successful x402 client reads the challenge,
-signs it, and automatically retries the same resource with `PAYMENT-SIGNATURE`.
+## Managed facilitator proxy
+
+`/api/pay/facilitator/{supported,verify,settle}` authenticates with the endpoint key, then:
+
+- limits each endpoint to 120 calls per minute across instances (Redis), with a per-instance in-memory backstop;
+- requires the payment to pay **this endpoint's payout address, in USDC, on its network**, checked against both the requirements and the signed transfer, so a leaked key cannot be used to settle arbitrary transfers on WebSoroban's sponsored fees;
+- strips developer credentials, adds the server-owned facilitator authorization, and times out after 20 seconds;
+- records fingerprints, never raw payment payloads.
 
 ## API surface
 
-- `GET /api/pay/overview` — authenticated studio data
-- `POST /api/pay/endpoints` — create an endpoint and return its key once
-- `PATCH /api/pay/endpoints/:id` — pause or resume
-- `POST /api/pay/endpoints/:id/rotate-key` — invalidate and replace a key
-- `GET /api/pay/resource/:slug` — hosted x402-protected JSON resource
-- `GET /api/pay/wallets` — auth-entry wallet compatibility list
-- `POST /api/pay/webhooks` — register `payment.settled`, `payment.failed`, or `wallet.spend_limit_exceeded`
-- `POST /api/pay/agent-wallets` — register an agent signer and a daily USDC cap
-- `/api/pay/facilitator/{supported,verify,settle}` — endpoint-key-authenticated proxy
+- `GET /api/pay/overview`: authenticated studio data and metrics
+- `GET /api/pay/networks`: enabled networks and facilitators
+- `GET /api/pay/wallets`: auth-entry wallet compatibility
+- `GET /api/pay/trustline?address=&network=`: public USDC trustline check
+- `POST /api/pay/endpoints`: create an endpoint (`network` optional) and return its key once
+- `PATCH /api/pay/endpoints/:id`: pause or resume
+- `POST /api/pay/endpoints/:id/rotate-key`: invalidate and replace a key
+- `GET /api/pay/resource/:slug`, `GET /api/pay/live/resource/:slug`: hosted x402 resources
+- `POST /api/pay/webhooks`, `PATCH|DELETE /api/pay/webhooks/:id`: manage webhooks
+- `POST /api/pay/webhooks/:id/test`, `GET /api/pay/webhooks/:id/deliveries`: test and inspect delivery
+- `POST /api/pay/agent-wallets`, `PATCH /api/pay/agent-wallets/:id`: agent spend caps
+- `/api/pay/facilitator/{supported,verify,settle}`: endpoint-key proxy for the SDK
 
-The proxy is limited to 120 calls per endpoint per minute, strips developer-supplied upstream credentials, adds the server-owned facilitator authorization, times out after 20 seconds, and records fingerprints rather than raw payment payloads. `npx tsx scripts/load-x402-proxy.ts` checks that budget in process and does not call the facilitator.
+## Testing
 
-Webhooks are signed `t=<unix>,v1=<hmac>` over `${timestamp}.${rawBody}` with header `X-WebSoroban-Signature`. Failed deliveries retry after 1s, 5s, 30s, and 120s.
+```bash
+npm test                         # unit tests, including the SDK
+X402_TEST_DATABASE_URL=… npm run test:integration   # real Postgres, mock facilitator
+X402_E2E_DATABASE_URL=… npx tsx scripts/x402-live-e2e.ts   # real testnet payments
+npx tsx scripts/load-x402-proxy.ts   # in-process rate-limit budget
+```
 
-Agent spend limits use the OpenZeppelin spending-limit shape (`spendingLimitStroops`, `periodLedgers` ≈ 17280). The cap is reserved before settle and released if settlement fails. A payment over the cap never reaches the facilitator.
-
-## Testnet boundary
-
-This release is testnet-only. Mainnet settlement, additional SEP-41 tokens, and MPP sessions are not shipped. Freighter Mobile cannot sign auth entries; checkout says so instead of failing silently.
+The live e2e funds throwaway testnet accounts (Friendbot, USDC trustline, XLM swapped to USDC on the testnet DEX), then pays both the hosted resource and an SDK-protected Express route, and checks that the payout account received the USDC. Both database variables must point at a disposable, migrated database. The scripts never fall back to `DATABASE_URL`.

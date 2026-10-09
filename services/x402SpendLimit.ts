@@ -48,18 +48,3 @@ export function applySpend(state: SpendState, amountStroops: bigint, now: number
   }
   return { ok: true, spentStroops: spent + amountStroops, windowStartedAt }
 }
-
-/** Pull a Stellar G-address out of an x402 verify/settle body when the facilitator has not echoed payer yet. */
-export function extractPayer(body: unknown): string | null {
-  const record = body as Record<string, any> | null
-  const candidates = [
-    record?.payer,
-    record?.paymentPayload?.payload?.authorization?.from,
-    record?.paymentPayload?.payload?.payer,
-    record?.paymentPayload?.from,
-  ]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && /^G[A-Z2-7]{55}$/.test(candidate)) return candidate
-  }
-  return null
-}

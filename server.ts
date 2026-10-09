@@ -27,6 +27,7 @@ import skillsRoutes from './routes/skills';
 import billingRoutes from './routes/billing';
 import dodoWebhookRoutes from './routes/webhooks/dodo';
 import payRoutes from './routes/pay';
+import { startWebhookDispatcher } from './services/x402Webhooks';
 import { initObservability, captureError, logger } from './lib/observability';
 
 // Initialize error monitoring (Sentry if SENTRY_DSN + @sentry/node present).
@@ -82,7 +83,7 @@ const corsOptions: cors.CorsOptions = {
     callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   // x402 browser clients retry the request with PAYMENT-SIGNATURE after the
   // wallet approves. Keep X-PAYMENT for v1/backwards-compatible clients.
   allowedHeaders: [
@@ -244,6 +245,9 @@ server.listen(PORT, '0.0.0.0', () => {
   // Verify Socket.IO is working
   console.log(`Socket.IO namespace: ${(io as any).name}`);
   console.log(`Socket.IO engine: ${(io.engine as any)?.constructor?.name || 'unknown'}`);
+
+  // Pay webhooks retry from Postgres, so any API instance resumes pending deliveries.
+  startWebhookDispatcher();
 });
 
 // Last-resort process guards so a stray async error is captured (and reported to

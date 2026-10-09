@@ -695,7 +695,7 @@ const PAID_API_ENDPOINT: TemplateBundle = {
       path: 'package.json',
       content: `{
   "name": "websoroban-paid-api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.15.0",
@@ -704,6 +704,7 @@ const PAID_API_ENDPOINT: TemplateBundle = {
   },
   "scripts": {
     "dev": "tsx watch --env-file=.env src/server.ts",
+    "pay": "tsx --env-file=.env scripts/pay.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/server.js",
     "typecheck": "tsc --noEmit"
@@ -711,6 +712,7 @@ const PAID_API_ENDPOINT: TemplateBundle = {
   "dependencies": {
     "@x402/core": "^2.25.0",
     "@x402/express": "^2.25.0",
+    "@x402/fetch": "^2.25.0",
     "@x402/stellar": "^2.25.0",
     "dotenv": "^16.6.1",
     "express": "^4.21.2"
@@ -747,9 +749,14 @@ const PAID_API_ENDPOINT: TemplateBundle = {
       content: `# Copy this file to .env. Create the endpoint in WebSoroban Payment Studio.
 WEBSOROBAN_API_URL=https://backend-ide-production.up.railway.app/api
 WEBSOROBAN_ENDPOINT_ID=replace_with_endpoint_id
+# wsp_test_… settles on Stellar testnet, wsp_live_… on mainnet.
 WEBSOROBAN_PAY_KEY=replace_with_scoped_endpoint_key
-STELLAR_PAY_TO=G_REPLACE_WITH_YOUR_TESTNET_RECIPIENT
+STELLAR_PAY_TO=G_REPLACE_WITH_THE_ENDPOINT_PAYOUT_ADDRESS
 PORT=8787
+
+# Optional, testnet only: a payer secret used by \`pnpm pay\` to make a real
+# paid request from the terminal. The account needs testnet USDC.
+PAYER_SECRET=
 `
     },
     {
@@ -776,7 +783,16 @@ import { paymentMiddleware, x402ResourceServer } from '@x402/express';
 import { HTTPFacilitatorClient } from '@x402/core/server';
 import { ExactStellarScheme } from '@x402/stellar/exact/server';
 
-const STELLAR_TESTNET = 'stellar:testnet' as const;
+export type StellarNetwork = 'stellar:testnet' | 'stellar:pubnet';
+
+const HORIZON: Record<StellarNetwork, string> = {
+  'stellar:testnet': 'https://horizon-testnet.stellar.org',
+  'stellar:pubnet': 'https://horizon.stellar.org',
+};
+const USDC_ISSUER: Record<StellarNetwork, string> = {
+  'stellar:testnet': 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+  'stellar:pubnet': 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+};
 
 export interface WebSorobanPayOptions {
   apiUrl: string;
@@ -790,25 +806,32 @@ export interface ProtectOptions {
   maxTimeoutSeconds?: number;
 }
 
+/** The key prefix decides the network, so a testnet key never guards a mainnet route. */
+export function networkFromKey(apiKey: string): StellarNetwork {
+  if (apiKey.startsWith('wsp_live_')) return 'stellar:pubnet';
+  if (apiKey.startsWith('wsp_test_')) return 'stellar:testnet';
+  throw new Error('WEBSOROBAN_PAY_KEY must start with wsp_test_ or wsp_live_.');
+}
+
 export function createWebSorobanPay(options: WebSorobanPayOptions) {
   if (!options.apiKey) throw new Error('WEBSOROBAN_PAY_KEY is required.');
   if (!options.endpointId) throw new Error('WEBSOROBAN_ENDPOINT_ID is required.');
-  if (!/^G[A-Z2-7]{55}$/.test(options.payTo)) {
-    throw new Error('STELLAR_PAY_TO must be a Stellar G-address.');
+  if (!/^[GC][A-Z2-7]{55}$/.test(options.payTo)) {
+    throw new Error('STELLAR_PAY_TO must be the endpoint payout address (G… or C…).');
   }
+  const network = networkFromKey(options.apiKey);
+  const facilitatorUrl = options.apiUrl.replace(/\\/$/, '') + '/pay/facilitator';
+  const auth = { Authorization: 'Bearer ' + options.apiKey };
 
   const facilitator = new HTTPFacilitatorClient({
-    url: options.apiUrl.replace(/\\/$/, '') + '/pay/facilitator',
-    createAuthHeaders: async () => {
-      const auth = { Authorization: 'Bearer ' + options.apiKey };
-      return { verify: auth, settle: auth, supported: auth };
-    },
+    url: facilitatorUrl,
+    createAuthHeaders: async () => ({ verify: auth, settle: auth, supported: auth }),
   });
-
-  const resourceServer = new x402ResourceServer(facilitator)
-    .register(STELLAR_TESTNET, new ExactStellarScheme());
+  const resourceServer = new x402ResourceServer(facilitator).register(network, new ExactStellarScheme());
 
   return {
+    network,
+
     protect(
       route: \`\${'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'} /\${string}\`,
       price: string,
@@ -818,16 +841,45 @@ export function createWebSorobanPay(options: WebSorobanPayOptions) {
         [route]: {
           accepts: {
             scheme: 'exact',
-            network: STELLAR_TESTNET,
+            network,
             price,
             payTo: options.payTo,
             maxTimeoutSeconds: settings.maxTimeoutSeconds ?? 60,
           },
           serviceName: 'WebSoroban Pay',
-          description: settings.description || 'A Stellar testnet endpoint protected by x402.',
+          description: settings.description || 'A Stellar endpoint protected by x402.',
           mimeType: 'application/json',
         },
       }, resourceServer, undefined, undefined, true);
+    },
+
+    /** Startup check: the key reaches WebSoroban and the payout account can receive USDC. */
+    async preflight(): Promise<string[]> {
+      const problems: string[] = [];
+      try {
+        const response = await fetch(facilitatorUrl + '/supported', { headers: auth, signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { message?: string };
+          problems.push('Endpoint key rejected: ' + (body.message || 'HTTP ' + response.status) + '. Copy the key again from Payment Studio.');
+        }
+      } catch {
+        problems.push('Could not reach ' + facilitatorUrl + '. Check WEBSOROBAN_API_URL.');
+      }
+      if (options.payTo.startsWith('G')) {
+        try {
+          const response = await fetch(HORIZON[network] + '/accounts/' + options.payTo, { signal: AbortSignal.timeout(5_000) });
+          if (response.status === 404) {
+            problems.push('STELLAR_PAY_TO does not exist on ' + network + '. Fund it with XLM first.');
+          } else if (response.ok) {
+            const account = (await response.json()) as { balances?: Array<{ asset_code?: string; asset_issuer?: string }> };
+            const hasUsdc = (account.balances || []).some((line) => line.asset_code === 'USDC' && line.asset_issuer === USDC_ISSUER[network]);
+            if (!hasUsdc) problems.push('STELLAR_PAY_TO has no USDC trustline, so settlements to it will fail. Add USDC in its wallet.');
+          }
+        } catch {
+          // Horizon being unreachable is not a configuration problem.
+        }
+      }
+      return problems;
     },
   };
 }
@@ -851,7 +903,7 @@ const pay = createWebSorobanPay({
 });
 
 app.get('/health', (_request, response) => {
-  response.json({ ok: true, network: 'stellar:testnet' });
+  response.json({ ok: true, network: pay.network });
 });
 
 // This is the one-line paywall. The handler below runs only after settlement.
@@ -864,14 +916,60 @@ app.get('/api/research-brief', (_request, response) => {
     title: 'Agentic payments on Stellar',
     summary: 'The request paid 0.01 USDC and reached the protected handler.',
     paid: true,
-    network: 'stellar:testnet',
+    network: pay.network,
   });
 });
 
-app.listen(config.port, () => {
-  console.log(\`Paid API listening on http://localhost:\${config.port}\`);
+app.listen(config.port, async () => {
+  console.log(\`Paid API listening on http://localhost:\${config.port} (\${pay.network})\`);
   console.log(\`Protected route: http://localhost:\${config.port}/api/research-brief\`);
+  const problems = await pay.preflight();
+  if (problems.length) {
+    console.warn('\\nSetup needs attention before payments can settle:');
+    for (const problem of problems) console.warn('  • ' + problem);
+  } else {
+    console.log('Preflight passed: key accepted and payout account can receive USDC.');
+  }
 });
+`
+    },
+    {
+      path: 'scripts/pay.ts',
+      content: `// Make one real paid request from the terminal (testnet only).
+// The payer signs a single USDC authorization; WebSoroban's facilitator
+// submits it and sponsors the network fee.
+import { x402Client, x402HTTPClient, wrapFetchWithPayment } from '@x402/fetch';
+import { createEd25519Signer } from '@x402/stellar';
+import { ExactStellarScheme } from '@x402/stellar/exact/client';
+
+const secret = process.env.PAYER_SECRET?.trim();
+const port = Number(process.env.PORT || 8787);
+const url = process.argv[2] || \`http://localhost:\${port}/api/research-brief\`;
+
+if (!secret) {
+  console.error('Set PAYER_SECRET in .env to a testnet account that holds testnet USDC.');
+  process.exit(1);
+}
+if (process.env.WEBSOROBAN_PAY_KEY?.startsWith('wsp_live_')) {
+  console.error('pnpm pay is testnet only. Pay mainnet endpoints from a wallet.');
+  process.exit(1);
+}
+
+const signer = createEd25519Signer(secret, 'stellar:testnet');
+const client = new x402Client().register('stellar:*', new ExactStellarScheme(signer, { url: 'https://soroban-testnet.stellar.org' }));
+const paidFetch = wrapFetchWithPayment(fetch, client);
+
+const response = await paidFetch(url, { headers: { Accept: 'application/json' } });
+const body = await response.json().catch(() => ({}));
+if (!response.ok) {
+  console.error(\`Payment failed with HTTP \${response.status}:\`, body);
+  process.exit(1);
+}
+const settlement = new x402HTTPClient(client).getPaymentSettleResponse((name) => response.headers.get(name));
+console.log('Paid response:', body);
+if (settlement?.transaction) {
+  console.log(\`Receipt: https://stellar.expert/explorer/testnet/tx/\${settlement.transaction}\`);
+}
 `
     },
     {
@@ -888,17 +986,16 @@ Accept: application/json
       path: 'README.md',
       content: `# Paid API endpoint
 
-A runnable Express + TypeScript endpoint protected by **$0.01 USDC on Stellar testnet** through WebSoroban's managed x402 facilitator.
+A runnable Express + TypeScript endpoint protected by **$0.01 USDC on Stellar** through WebSoroban's managed x402 facilitator. Testnet by default; a \`wsp_live_\` key switches it to mainnet.
 
 ## 1. Create the payment endpoint
 
-Open **WebSoroban → Payments → New endpoint** and create a testnet endpoint with:
+Open **WebSoroban → Pay** and create a testnet endpoint:
 
-- Route: \`GET /api/research-brief\`
-- Price: \`$0.01\`
-- Recipient: your funded Stellar testnet G-address
+- Price: \`0.01\`
+- Payout address: a funded Stellar testnet G-address **with a USDC trustline** (the studio checks this for you)
 
-Copy the endpoint id and the scoped key when it is shown. The key is displayed once.
+Copy the endpoint id and the scoped key when they are shown. The key is displayed once.
 
 ## 2. Configure and run
 
@@ -909,7 +1006,7 @@ pnpm install
 pnpm dev
 \`\`\`
 
-Node 22 or newer is required by \`@x402/stellar\`.
+On start the server runs a preflight: it confirms the key reaches WebSoroban and that the payout account can receive USDC, and prints exactly what to fix if not. Node 22 or newer is required by \`@x402/stellar\`.
 
 ## 3. Confirm the paywall
 
@@ -917,9 +1014,19 @@ Node 22 or newer is required by \`@x402/stellar\`.
 curl -i http://localhost:8787/api/research-brief
 \`\`\`
 
-The first request returns **HTTP 402** and payment requirements. An x402-compatible client signs the Stellar authorization, retries with the payment header, and receives the protected JSON after settlement.
+The first request returns **HTTP 402** with payment requirements.
 
-Use \`requests.http\` for the public health check and unpaid challenge. The scoped key stays on this server; never expose it in browser code or commit your \`.env\` file.
+## 4. Make a paid request
+
+Put a testnet account secret with testnet USDC in \`PAYER_SECRET\` (get USDC from https://faucet.circle.com, Stellar Testnet), then:
+
+\`\`\`bash
+pnpm pay
+\`\`\`
+
+The script signs one USDC authorization, the facilitator settles it, and you get the protected JSON plus a Stellar Expert receipt link. The payment appears in Payment Studio's activity feed. Browser users can pay the same endpoint from the hosted checkout.
+
+The scoped key stays on this server; never expose it in browser code or commit your \`.env\` file.
 `
     },
     {

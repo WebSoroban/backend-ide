@@ -27,6 +27,12 @@ test('Paid API endpoint is a free, complete scaffold', () => {
 
   const adapter = files.get('src/websoroban-pay.ts')!;
   assert.match(adapter, /\/pay\/facilitator/);
-  assert.match(adapter, /stellar:testnet/);
+  assert.match(adapter, /wsp_test_/);
+  assert.match(adapter, /wsp_live_/);
+  assert.match(adapter, /preflight/);
+
+  assert.match(files.get('scripts/pay.ts')!, /wrapFetchWithPayment/);
+  assert.equal(packageJson.scripts.pay, 'tsx --env-file=.env scripts/pay.ts');
+  assert.ok(!files.get('README.md')!.includes('\\`'), 'README must not contain escaped backticks');
   assert.doesNotMatch(files.get('.env.example')!, /28076b0b-57cd-42b1-9cbc-b386e762c1dc/);
 });
