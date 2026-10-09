@@ -9,6 +9,7 @@ import { USDC_PUBNET_ADDRESS, USDC_TESTNET_ADDRESS } from '@x402/stellar';
 import type { X402Endpoint } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
+import { requireAdmin } from '../middleware/admin';
 import { rateLimit } from '../middleware/rateLimit';
 import {
   X402_ASSET,
@@ -50,6 +51,7 @@ import {
   WEBHOOK_EVENTS,
 } from '../services/x402Webhooks';
 import { encrypt } from '../lib/crypto';
+import { adoptionReport } from '../services/x402Adoption';
 
 const router = express.Router();
 const railwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
@@ -472,6 +474,11 @@ router.get('/overview', authenticate, asyncRoute(async (req: Request, res: Respo
       createdAt: wallet.createdAt.toISOString(),
     })),
   });
+}));
+
+// Team-only KR report: external adopters and time to first paid request.
+router.get('/adoption', authenticate, requireAdmin, asyncRoute(async (_req: Request, res: Response) => {
+  res.json({ success: true, ...(await adoptionReport()) });
 }));
 
 router.post('/endpoints', authenticate, async (req: Request, res: Response) => {

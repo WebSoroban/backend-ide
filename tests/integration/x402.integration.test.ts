@@ -354,6 +354,35 @@ describe('WebSoroban Pay integration', { skip: !DATABASE_URL && 'X402_TEST_DATAB
     assert.ok(overview.body.webhooks[0].lastDelivery);
     assert.deepEqual(overview.body.networks.map((network: any) => network.enabled), [true, false]);
   });
+
+  test('counts external adopters from real payments only', async () => {
+    const { adoptionReport } = await import('../../services/x402Adoption');
+    delete process.env.ADMIN_EMAILS;
+
+    // A second account that only ever paid itself must not count.
+    const selfTester = await prisma.user.create({ data: { email: `self-${Date.now()}@example.test` } });
+    const own = Keypair.random().publicKey();
+    const selfEndpoint = await prisma.x402Endpoint.create({
+      data: { userId: selfTester.id, name: 'Self test', slug: `self-${Date.now()}`, price: '$0.01', payTo: own, apiKeyHash: `hash-${Date.now()}`, apiKeyPrefix: 'wsp_test_x…' },
+    });
+    await prisma.x402Event.create({ data: { endpointId: selfEndpoint.id, type: 'settlement', status: 'settled', payer: own, amount: '$0.01' } });
+
+    try {
+      const report = await adoptionReport();
+      const mine = report.adopters.filter((row) => row.account.endsWith('@example.test'));
+      assert.equal(report.externalAdopters >= 1, true);
+      assert.ok(mine.some((row) => row.viaSdk), 'proxy settlements count as SDK adoption');
+      assert.ok(!report.adopters.some((row) => row.account === 's***@example.test'), 'self-payments never count');
+      assert.equal(report.timeToFirstPaidRequest.samples, report.externalAdopters);
+
+      process.env.ADMIN_EMAILS = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).email;
+      const asTeam = await adoptionReport();
+      assert.equal(asTeam.externalAdopters, report.externalAdopters - 1, 'team accounts are excluded');
+    } finally {
+      delete process.env.ADMIN_EMAILS;
+      await prisma.user.delete({ where: { id: selfTester.id } });
+    }
+  });
 });
 
 async function waitFor(check: () => boolean, timeoutMs = 5_000) {

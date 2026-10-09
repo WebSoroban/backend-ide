@@ -127,6 +127,18 @@ An agent wallet caps a signer's daily USDC spend (`spendingLimitStroops`, `perio
 - `POST /api/pay/agent-wallets`, `PATCH /api/pay/agent-wallets/:id`: agent spend caps
 - `/api/pay/facilitator/{supported,verify,settle}`: endpoint-key proxy for the SDK
 
+## Adoption and time-to-first-payment
+
+`GET /api/pay/adoption` (admin) and `npx tsx scripts/x402-adoption.ts` report:
+
+- **External adopters** (KR target ≥ 10): non-team accounts with an endpoint
+  that settled a payment from a payer other than its own payout address.
+  Self-payments and team accounts never count. Team accounts are
+  `ADMIN_EMAILS`, `X402_INTERNAL_EMAILS`, and `X402_INTERNAL_DOMAINS`.
+- The funnel: created an endpoint → served a 402 → was paid (and via the SDK).
+- **Time from endpoint creation to first paid request**: median, p75, and
+  the count within 30 minutes. The KR1.1 session protocol is in `X402_STUDY.md`.
+
 ## Testing
 
 ```bash

@@ -180,3 +180,23 @@ test('lists checkout-capable wallets honestly', () => {
   assert.equal(walletCompatibility('FREIGHTER-MOBILE')?.authEntry, false)
   assert.equal(walletCompatibility('unknown'), null)
 })
+
+test('treats team accounts as internal for adoption metrics', async () => {
+  const { isInternalEmail, maskEmail } = await import('../services/x402Adoption')
+  const previous = { admins: process.env.ADMIN_EMAILS, domains: process.env.X402_INTERNAL_DOMAINS }
+  process.env.ADMIN_EMAILS = 'Founder@Example.com'
+  process.env.X402_INTERNAL_DOMAINS = 'websoroban.in'
+  try {
+    assert.equal(isInternalEmail('founder@example.com'), true)
+    assert.equal(isInternalEmail('dev@websoroban.in'), true)
+    assert.equal(isInternalEmail('dev@team.websoroban.in'), true)
+    assert.equal(isInternalEmail('dev@notwebsoroban.in'), false)
+    assert.equal(isInternalEmail('builder@gmail.com'), false)
+    assert.equal(maskEmail('builder@gmail.com'), 'b***@gmail.com')
+  } finally {
+    for (const [name, value] of [['ADMIN_EMAILS', previous.admins], ['X402_INTERNAL_DOMAINS', previous.domains]] as const) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+})
