@@ -27,6 +27,7 @@ import skillsRoutes from './routes/skills';
 import billingRoutes from './routes/billing';
 import dodoWebhookRoutes from './routes/webhooks/dodo';
 import payRoutes from './routes/pay';
+import { allowedOrigins as corsAllowedOrigins, isAllowedOrigin } from './lib/cors';
 import payloopRoutes from './routes/payloop';
 import { startWebhookDispatcher } from './services/x402Webhooks';
 import { initObservability, captureError, logger } from './lib/observability';
@@ -42,47 +43,13 @@ const app = express();
 const server = http.createServer(app);
 
 // Allowed frontend origins (hardcoded)
-const allowedOrigins = [
-  "https://web-soroban.vercel.app",
-  "https://websoroban.in",
-  "https://www.websoroban.in",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000"
-];
+const allowedOrigins = corsAllowedOrigins();
 
 // CORS validation function
 const corsOptions: cors.CorsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) {
-      console.log('[CORS] Request with no origin - allowing');
-      return callback(null, true);
-    }
-
-    console.log(`[CORS] Request from origin: ${origin}`);
-
-    // Normalize origin (remove trailing slash, www, etc.)
-    const normalizedOrigin = origin.replace(/\/$/, ''); // Remove trailing slash
-
-    // Check if origin is in allowed list (exact match or normalized)
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes(normalizedOrigin)) {
-      console.log(`[CORS] Origin allowed: ${origin}`);
-      return callback(null, true);
-    }
-    // In development, allow any localhost / 127.0.0.1 origin (different ports)
-    if (process.env.NODE_ENV !== 'production') {
-      try {
-        const u = new URL(origin);
-        if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-          console.log(`[CORS] Origin allowed (dev): ${origin}`);
-          return callback(null, true);
-        }
-      } catch (_) {}
-    }
-    console.log(`[CORS] Origin NOT allowed: ${origin}`);
-    console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
-    callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
-  },
+  // Disallowed origins get no CORS headers (the browser blocks them) rather
+  // than a 500 for every request.
+  origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   // x402 browser clients retry the request with PAYMENT-SIGNATURE after the
@@ -109,7 +76,7 @@ const corsOptions: cors.CorsOptions = {
 // Socket.IO setup with CORS
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
     methods: ["GET", "POST"],
     credentials: true
   }

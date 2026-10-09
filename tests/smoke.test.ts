@@ -178,3 +178,18 @@ test('layout: a missing Cargo.toml fails validation', () => {
   assert.equal(res.ok, false);
   assert.ok(res.errors.some((e) => /Manifest not found/i.test(e)));
 });
+
+test('cors: allows production, this project\'s Vercel previews, and nothing else', async () => {
+  const { isAllowedOrigin } = await import('../lib/cors');
+  const preview = 'https://web-soroban-git-x402-harsh-sharmas-projects-edd77f1e.vercel.app';
+  assert.equal(isAllowedOrigin('https://websoroban.in', true), true);
+  assert.equal(isAllowedOrigin(undefined, true), true);
+  assert.equal(isAllowedOrigin(preview, true), true);
+  assert.equal(isAllowedOrigin('https://web-soroban-abc123def-harsh-sharmas-projects-edd77f1e.vercel.app', true), true);
+  assert.equal(isAllowedOrigin('https://evil-harsh-sharmas-projects-edd77f1e.vercel.app', true), false);
+  assert.equal(isAllowedOrigin('https://web-soroban-x.evil.app?.harsh-sharmas-projects-edd77f1e.vercel.app', true), false);
+  assert.equal(isAllowedOrigin('http://web-soroban-git-x402-harsh-sharmas-projects-edd77f1e.vercel.app', true), false);
+  assert.equal(isAllowedOrigin('https://web-soroban-git-x402-other-team.vercel.app', true), false);
+  assert.equal(isAllowedOrigin('http://localhost:5173', true), false);
+  assert.equal(isAllowedOrigin('http://localhost:5173', false), true);
+});
