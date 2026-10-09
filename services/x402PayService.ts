@@ -2,6 +2,9 @@ import { createHash, randomBytes } from 'crypto';
 import type { Prisma, X402Endpoint } from '@prisma/client';
 import { validateStellarDestinationAddress } from '@x402/stellar';
 import prisma from '../lib/prisma';
+import { queuePaymentWebhooks } from './x402Webhooks';
+
+export { normalizeX402Error } from './x402Errors';
 
 export const X402_NETWORK = 'stellar:testnet' as const;
 export const X402_ASSET = 'USDC' as const;
@@ -106,7 +109,7 @@ export interface X402EventInput {
 /** Observability must never interrupt verification or settlement. */
 export async function recordX402Event(input: X402EventInput): Promise<void> {
   try {
-    await prisma.x402Event.create({
+    const created = await prisma.x402Event.create({
       data: {
         endpointId: input.endpointId,
         type: input.type,
@@ -121,26 +124,10 @@ export async function recordX402Event(input: X402EventInput): Promise<void> {
         metadata: input.metadata || {},
       },
     });
+    void queuePaymentWebhooks(created);
   } catch (error) {
     console.error('[x402] Failed to persist payment event:', error);
   }
-}
-
-export function normalizeX402Error(error: unknown): { code: string; message: string } {
-  const raw = error instanceof Error ? error.message : String(error || 'Payment processing failed.');
-  if (/timeout|timed out|abort/i.test(raw)) {
-    return { code: 'FACILITATOR_TIMEOUT', message: 'The facilitator timed out. Retry the payment in a moment.' };
-  }
-  if (/auth.?entr|signature|signing|wallet/i.test(raw)) {
-    return { code: 'UNSUPPORTED_OR_INVALID_WALLET', message: 'The wallet could not produce a valid Stellar authorization entry.' };
-  }
-  if (/allowance|balance|insufficient|underfunded/i.test(raw)) {
-    return { code: 'INSUFFICIENT_BALANCE_OR_ALLOWANCE', message: 'The payer does not have enough USDC balance or allowance.' };
-  }
-  if (/network|rpc|ledger/i.test(raw)) {
-    return { code: 'STELLAR_NETWORK_ERROR', message: 'Stellar testnet could not confirm the payment. Retry shortly.' };
-  }
-  return { code: 'FACILITATOR_REJECTED', message: raw || 'The facilitator rejected the payment.' };
 }
 
 export function serializeEndpoint(endpoint: X402Endpoint, publicApiBase: string) {

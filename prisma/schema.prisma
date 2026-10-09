@@ -71,6 +71,8 @@ model User {
   creditLedger      CreditLedger[]
   aiUsage           AiUsage[]
   x402Endpoints     X402Endpoint[]
+  x402Webhooks      X402Webhook[]
+  x402AgentWallets  X402AgentWallet[]
 
   @@index([authMethod])
 }
@@ -371,9 +373,11 @@ model X402Endpoint {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  events  X402Event[]
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project      Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  events       X402Event[]
+  webhooks     X402Webhook[]
+  agentWallets X402AgentWallet[]
 
   @@index([userId, updatedAt])
   @@index([projectId])
@@ -400,6 +404,75 @@ model X402Event {
   @@index([endpointId, createdAt])
   @@index([endpointId, status, createdAt])
   @@index([transaction])
+}
+
+// Developer-registered callbacks for settled and failed testnet payments.
+// The signing secret is encrypted at rest and returned once at creation.
+model X402Webhook {
+  id              String   @id @default(cuid())
+  userId          String
+  endpointId      String?
+  url             String
+  events          String[]
+  secretEncrypted String
+  secretPrefix    String
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint   X402Endpoint?          @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  deliveries X402WebhookDelivery[]
+
+  @@index([userId, createdAt])
+  @@index([endpointId])
+}
+
+model X402WebhookDelivery {
+  id             String    @id @default(cuid())
+  webhookId      String
+  eventType      String
+  payload        Json
+  status         String
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime?
+  lastStatusCode Int?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  webhook X402Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+// Agent signer registered with an OpenZeppelin-shaped daily USDC spending limit.
+// The settle path rejects a payment that would exceed the cap before the
+// facilitator is called.
+model X402AgentWallet {
+  id              String   @id @default(cuid())
+  userId          String
+  endpointId      String?
+  name            String
+  publicKey       String
+  spendLimitUsdc  String
+  limitStroops    String
+  spentStroops    String   @default("0")
+  periodSeconds   Int      @default(86400)
+  periodLedgers   Int      @default(17280)
+  windowStartedAt DateTime @default(now())
+  asset           String   @default("USDC")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint X402Endpoint? @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([publicKey])
+  @@index([endpointId])
 }
 
 // ---------------------------------------------------------------------------

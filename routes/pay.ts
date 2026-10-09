@@ -23,6 +23,13 @@ import {
   serializeEndpoint,
   validatePayoutAddress,
 } from '../services/x402PayService';
+import { explainX402Error, X402_ERROR_CATALOG } from '../services/x402Errors';
+import { facilitatorProxyLimiter } from '../services/x402RateLimit';
+import { AUTH_ENTRY_WALLETS } from '../services/x402Wallets';
+import { extractPayer, usdcToStroops, DAY_LEDGERS, stroopsToUsdc } from '../services/x402SpendLimit';
+import { releaseAgentSpend, reserveAgentSpend } from '../services/x402AgentSpend';
+import { createWebhookSecret, isWebhookUrl, WEBHOOK_EVENTS } from '../services/x402Webhooks';
+import { encrypt } from '../lib/crypto';
 
 const router = express.Router();
 const railwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
@@ -103,7 +110,24 @@ resourceServer.onVerifyFailure(async (context) => {
   });
 });
 
+resourceServer.onBeforeSettle(async (context) => {
+  const endpoint = await endpointFromTransport(context.transportContext);
+  if (!endpoint) return;
+  const gate = await reserveAgentSpend({
+    userId: endpoint.userId,
+    endpointId: endpoint.id,
+    payer: extractPayer({ paymentPayload: context.paymentPayload }),
+    price: endpoint.price,
+  });
+  if (!gate.allowed) {
+    return { abort: true, reason: 'SPEND_LIMIT_EXCEEDED', message: gate.message };
+  }
+  await rememberReservation(context.paymentPayload, gate);
+});
+
 resourceServer.onAfterSettle(async (context) => {
+  if (!context.result.success) await releaseReservation(context.paymentPayload);
+  else spendReservations.delete(fingerprintPayment(context.paymentPayload));
   const endpoint = await endpointFromTransport(context.transportContext);
   if (!endpoint) return;
   await recordX402Event({
@@ -121,6 +145,7 @@ resourceServer.onAfterSettle(async (context) => {
 });
 
 resourceServer.onSettleFailure(async (context) => {
+  await releaseReservation(context.paymentPayload);
   const endpoint = await endpointFromTransport(context.transportContext);
   if (!endpoint) return;
   const normalized = normalizeX402Error(context.error);
@@ -211,16 +236,18 @@ function getBearerToken(req: Request): string {
   return req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || '';
 }
 
-const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-function enforceProxyRateLimit(key: string): boolean {
-  const now = Date.now();
-  const current = rateBuckets.get(key);
-  if (!current || current.resetAt <= now) {
-    rateBuckets.set(key, { count: 1, resetAt: now + 60_000 });
-    return true;
-  }
-  current.count += 1;
-  return current.count <= 120;
+const spendReservations = new Map<string, { walletId: string; amountStroops: bigint }>();
+
+async function rememberReservation(payload: unknown, gate: { walletId?: string; amountStroops?: bigint }) {
+  if (!gate.walletId || gate.amountStroops === undefined) return;
+  spendReservations.set(fingerprintPayment(payload), { walletId: gate.walletId, amountStroops: gate.amountStroops });
+}
+
+async function releaseReservation(payload: unknown) {
+  const reserved = spendReservations.get(fingerprintPayment(payload));
+  if (!reserved) return;
+  spendReservations.delete(fingerprintPayment(payload));
+  await releaseAgentSpend(reserved.walletId, reserved.amountStroops);
 }
 
 async function authenticateEndpointKey(req: Request, res: Response, next: NextFunction) {
@@ -234,11 +261,14 @@ async function authenticateEndpointKey(req: Request, res: Response, next: NextFu
         message: 'Use an active WebSoroban Pay endpoint key.',
       });
     }
-    if (!enforceProxyRateLimit(endpoint.id)) {
+    if (!facilitatorProxyLimiter.allow(endpoint.id)) {
+      const limited = explainX402Error('RATE_LIMITED')!;
       return res.status(429).json({
         success: false,
-        error: 'RATE_LIMITED',
-        message: 'This endpoint exceeded 120 facilitator calls per minute. Retry shortly.',
+        error: limited.code,
+        message: limited.message,
+        cause: limited.cause,
+        fix: limited.fix,
       });
     }
     (req as any).x402Endpoint = endpoint;
@@ -247,6 +277,10 @@ async function authenticateEndpointKey(req: Request, res: Response, next: NextFu
     next(error);
   }
 }
+
+router.get('/wallets', (_req, res) => {
+  res.json({ success: true, network: X402_NETWORK, wallets: AUTH_ENTRY_WALLETS });
+});
 
 // Dashboard overview.
 router.get('/overview', authenticate, asyncRoute(async (req: Request, res: Response) => {
@@ -278,6 +312,10 @@ router.get('/overview', authenticate, asyncRoute(async (req: Request, res: Respo
     const amount = Number(String(event.amount || '0').replace(/^\$/, ''));
     return sum + (Number.isFinite(amount) ? amount : 0);
   }, 0);
+  const [webhooks, agentWallets] = await Promise.all([
+    prisma.x402Webhook.findMany({ where: { userId: req.user!.id }, orderBy: { createdAt: 'desc' } }),
+    prisma.x402AgentWallet.findMany({ where: { userId: req.user!.id }, orderBy: { createdAt: 'desc' } }),
+  ]);
 
   res.json({
     success: true,
@@ -303,8 +341,34 @@ router.get('/overview', authenticate, asyncRoute(async (req: Request, res: Respo
       amount: event.amount,
       errorCode: event.errorCode,
       errorMessage: event.errorMessage,
+      errorCause: explainX402Error(event.errorCode)?.cause || null,
+      errorFix: explainX402Error(event.errorCode)?.fix || null,
       latencyMs: event.latencyMs,
       createdAt: event.createdAt.toISOString(),
+    })),
+    wallets: AUTH_ENTRY_WALLETS,
+    errors: X402_ERROR_CATALOG,
+    webhooks: webhooks.map((hook) => ({
+      id: hook.id,
+      endpointId: hook.endpointId,
+      url: hook.url,
+      events: hook.events,
+      secretPrefix: hook.secretPrefix,
+      active: hook.active,
+      createdAt: hook.createdAt.toISOString(),
+    })),
+    agentWallets: agentWallets.map((wallet) => ({
+      id: wallet.id,
+      endpointId: wallet.endpointId,
+      name: wallet.name,
+      publicKey: wallet.publicKey,
+      spendLimitUsdc: wallet.spendLimitUsdc,
+      spentUsdc: stroopsToUsdc(BigInt(wallet.spentStroops)),
+      periodSeconds: wallet.periodSeconds,
+      periodLedgers: wallet.periodLedgers,
+      asset: wallet.asset,
+      active: wallet.active,
+      createdAt: wallet.createdAt.toISOString(),
     })),
   });
 }));
@@ -391,6 +455,103 @@ router.post('/endpoints/:id/rotate-key', authenticate, asyncRoute(async (req: Re
   });
 }));
 
+router.post('/webhooks', authenticate, asyncRoute(async (req: Request, res: Response) => {
+  const url = String(req.body?.url || '').trim();
+  const events = Array.isArray(req.body?.events) ? req.body.events.map(String) : [];
+  const endpointId = req.body?.endpointId ? String(req.body.endpointId) : null;
+  if (!isWebhookUrl(url)) {
+    return res.status(400).json({ success: false, error: 'Webhook URL must be https, or http://localhost for development.' });
+  }
+  if (!events.length || events.some((event: string) => !WEBHOOK_EVENTS.includes(event as typeof WEBHOOK_EVENTS[number]))) {
+    return res.status(400).json({ success: false, error: `Events must be one or more of: ${WEBHOOK_EVENTS.join(', ')}.` });
+  }
+  if (endpointId) {
+    const endpoint = await prisma.x402Endpoint.findFirst({ where: { id: endpointId, userId: req.user!.id } });
+    if (!endpoint) return res.status(404).json({ success: false, error: 'Endpoint was not found.' });
+  }
+  const secret = createWebhookSecret();
+  const webhook = await prisma.x402Webhook.create({
+    data: {
+      userId: req.user!.id,
+      endpointId,
+      url,
+      events,
+      secretEncrypted: encrypt(secret.raw),
+      secretPrefix: secret.prefix,
+    },
+  });
+  res.status(201).json({
+    success: true,
+    secret: secret.raw,
+    warning: 'Copy this signing secret now. WebSoroban stores only an encrypted copy.',
+    webhook: {
+      id: webhook.id,
+      endpointId: webhook.endpointId,
+      url: webhook.url,
+      events: webhook.events,
+      secretPrefix: webhook.secretPrefix,
+      active: webhook.active,
+    },
+  });
+}));
+
+router.delete('/webhooks/:id', authenticate, asyncRoute(async (req: Request, res: Response) => {
+  const webhook = await prisma.x402Webhook.findFirst({ where: { id: req.params.id, userId: req.user!.id } });
+  if (!webhook) return res.status(404).json({ success: false, error: 'Webhook was not found.' });
+  await prisma.x402Webhook.delete({ where: { id: webhook.id } });
+  res.json({ success: true });
+}));
+
+router.post('/agent-wallets', authenticate, asyncRoute(async (req: Request, res: Response) => {
+  const name = String(req.body?.name || '').trim().slice(0, 80);
+  const publicKey = validatePayoutAddress(String(req.body?.publicKey || ''));
+  const spendLimitUsdc = String(req.body?.spendLimit || '').trim().replace(/^\$/, '');
+  const endpointId = req.body?.endpointId ? String(req.body.endpointId) : null;
+  if (name.length < 2) return res.status(400).json({ success: false, error: 'Agent wallet name must be at least 2 characters.' });
+  const limitStroops = usdcToStroops(spendLimitUsdc);
+  if (endpointId) {
+    const endpoint = await prisma.x402Endpoint.findFirst({ where: { id: endpointId, userId: req.user!.id } });
+    if (!endpoint) return res.status(404).json({ success: false, error: 'Endpoint was not found.' });
+  }
+  const wallet = await prisma.x402AgentWallet.create({
+    data: {
+      userId: req.user!.id,
+      endpointId,
+      name,
+      publicKey,
+      spendLimitUsdc,
+      limitStroops: limitStroops.toString(),
+      periodLedgers: DAY_LEDGERS,
+    },
+  });
+  res.status(201).json({
+    success: true,
+    wallet: {
+      id: wallet.id,
+      name: wallet.name,
+      publicKey: wallet.publicKey,
+      spendLimitUsdc: wallet.spendLimitUsdc,
+      periodLedgers: wallet.periodLedgers,
+      enforcement: 'settle-proxy',
+      policy: {
+        standard: 'openzeppelin-stellar-spending-limit',
+        spendingLimitStroops: wallet.limitStroops,
+        periodLedgers: wallet.periodLedgers,
+      },
+    },
+  });
+}));
+
+router.patch('/agent-wallets/:id', authenticate, asyncRoute(async (req: Request, res: Response) => {
+  const wallet = await prisma.x402AgentWallet.findFirst({ where: { id: req.params.id, userId: req.user!.id } });
+  if (!wallet) return res.status(404).json({ success: false, error: 'Agent wallet was not found.' });
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'The active field must be true or false.' });
+  }
+  const updated = await prisma.x402AgentWallet.update({ where: { id: wallet.id }, data: { active: req.body.active } });
+  res.json({ success: true, wallet: { id: updated.id, active: updated.active } });
+}));
+
 // Managed facilitator proxy for the SDK. Developer keys never reach OpenZeppelin.
 router.all('/facilitator/:operation', authenticateEndpointKey, async (req: Request, res: Response) => {
   const operation = String(req.params.operation || '').toLowerCase();
@@ -400,7 +561,26 @@ router.all('/facilitator/:operation', authenticateEndpointKey, async (req: Reque
 
   const endpoint = (req as any).x402Endpoint;
   const startedAt = Date.now();
+  let reservedSpend: { walletId?: string; amountStroops?: bigint } = {};
   try {
+    if (operation === 'settle') {
+      const gate = await reserveAgentSpend({
+        userId: endpoint.userId,
+        endpointId: endpoint.id,
+        payer: extractPayer(req.body),
+        price: endpoint.price,
+      });
+      if (!gate.allowed) {
+        return res.status(402).json({
+          success: false,
+          error: 'SPEND_LIMIT_EXCEEDED',
+          message: gate.message,
+          cause: explainX402Error('SPEND_LIMIT_EXCEEDED')?.cause,
+          fix: explainX402Error('SPEND_LIMIT_EXCEEDED')?.fix,
+        });
+      }
+      reservedSpend = gate;
+    }
     const upstream = await fetch(`${facilitatorUrl}/${operation}`, {
       method: req.method === 'GET' ? 'GET' : 'POST',
       headers: { 'Content-Type': 'application/json', ...facilitatorHeaders() },
@@ -413,6 +593,7 @@ router.all('/facilitator/:operation', authenticateEndpointKey, async (req: Reque
 
     if (operation !== 'supported') {
       const succeeded = operation === 'verify' ? body?.isValid === true : body?.success === true;
+      if (operation === 'settle' && !succeeded) await releaseAgentSpend(reservedSpend.walletId, reservedSpend.amountStroops);
       await recordX402Event({
         endpointId: endpoint.id,
         type: operation === 'verify' ? 'verification' : 'settlement',
@@ -430,6 +611,7 @@ router.all('/facilitator/:operation', authenticateEndpointKey, async (req: Reque
 
     res.status(upstream.status).type('application/json').send(JSON.stringify(body));
   } catch (error) {
+    if (operation === 'settle') await releaseAgentSpend(reservedSpend.walletId, reservedSpend.amountStroops);
     const normalized = normalizeX402Error(error);
     await recordX402Event({
       endpointId: endpoint.id,
@@ -441,7 +623,13 @@ router.all('/facilitator/:operation', authenticateEndpointKey, async (req: Reque
       latencyMs: Date.now() - startedAt,
       metadata: { source: 'managed_proxy', facilitator: facilitatorLabel() },
     });
-    res.status(502).json({ success: false, error: normalized.code, message: normalized.message });
+    res.status(502).json({
+      success: false,
+      error: normalized.code,
+      message: normalized.message,
+      cause: normalized.cause,
+      fix: normalized.fix,
+    });
   }
 });
 

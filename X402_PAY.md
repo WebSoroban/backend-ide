@@ -100,10 +100,17 @@ signs it, and automatically retries the same resource with `PAYMENT-SIGNATURE`.
 - `PATCH /api/pay/endpoints/:id` — pause or resume
 - `POST /api/pay/endpoints/:id/rotate-key` — invalidate and replace a key
 - `GET /api/pay/resource/:slug` — hosted x402-protected JSON resource
+- `GET /api/pay/wallets` — auth-entry wallet compatibility list
+- `POST /api/pay/webhooks` — register `payment.settled`, `payment.failed`, or `wallet.spend_limit_exceeded`
+- `POST /api/pay/agent-wallets` — register an agent signer and a daily USDC cap
 - `/api/pay/facilitator/{supported,verify,settle}` — endpoint-key-authenticated proxy
 
-The proxy is limited to 120 calls per endpoint per minute, strips developer-supplied upstream credentials, adds the server-owned facilitator authorization, times out after 20 seconds, and records fingerprints rather than raw payment payloads.
+The proxy is limited to 120 calls per endpoint per minute, strips developer-supplied upstream credentials, adds the server-owned facilitator authorization, times out after 20 seconds, and records fingerprints rather than raw payment payloads. `npx tsx scripts/load-x402-proxy.ts` checks that budget in process and does not call the facilitator.
 
-## MVP boundary
+Webhooks are signed `t=<unix>,v1=<hmac>` over `${timestamp}.${rawBody}` with header `X-WebSoroban-Signature`. Failed deliveries retry after 1s, 5s, 30s, and 120s.
 
-This release is testnet-only. Mainnet, spend limits, team roles, webhook delivery, and MPP sessions are not presented as shipped features.
+Agent spend limits use the OpenZeppelin spending-limit shape (`spendingLimitStroops`, `periodLedgers` ≈ 17280). The cap is reserved before settle and released if settlement fails. A payment over the cap never reaches the facilitator.
+
+## Testnet boundary
+
+This release is testnet-only. Mainnet settlement, additional SEP-41 tokens, and MPP sessions are not shipped. Freighter Mobile cannot sign auth entries; checkout says so instead of failing silently.

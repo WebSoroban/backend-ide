@@ -47,7 +47,9 @@ test('fingerprints payment material without retaining it', () => {
 test('maps facilitator failures to stable product errors', () => {
   assert.equal(normalizeX402Error(new Error('request timed out')).code, 'FACILITATOR_TIMEOUT');
   assert.equal(normalizeX402Error(new Error('insufficient balance')).code, 'INSUFFICIENT_BALANCE_OR_ALLOWANCE');
-  assert.equal(normalizeX402Error(new Error('invalid signature')).code, 'UNSUPPORTED_OR_INVALID_WALLET');
+  assert.equal(normalizeX402Error(new Error('invalid signature')).code, 'INVALID_SIGNATURE');
+  assert.equal(normalizeX402Error(new Error('unsupported wallet')).code, 'UNSUPPORTED_WALLET');
+  assert.match(normalizeX402Error(new Error('insufficient balance')).fix, /testnet USDC/);
 });
 
 test('rejects invalid Stellar payout addresses', () => {

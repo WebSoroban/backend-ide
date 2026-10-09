@@ -63,3 +63,54 @@ export function createWebSorobanPay(options: WebSorobanPayOptions) {
     },
   };
 }
+
+export type PayWebhookEvent = 'payment.settled' | 'payment.failed' | 'wallet.spend_limit_exceeded';
+
+async function studioRequest(apiUrl: string, accessToken: string, path: string, body: unknown) {
+  const response = await fetch(`${apiUrl.replace(/\/$/, '')}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || data.message || 'WebSoroban Pay request failed.');
+  return data;
+}
+
+/** Register a signed testnet webhook. The signing secret is returned once. */
+export function registerWebhook(options: {
+  apiUrl: string;
+  accessToken: string;
+  url: string;
+  events: PayWebhookEvent[];
+  endpointId?: string;
+}) {
+  return studioRequest(options.apiUrl, options.accessToken, '/pay/webhooks', {
+    url: options.url,
+    events: options.events,
+    endpointId: options.endpointId,
+  });
+}
+
+/**
+ * Register an agent signer with a daily USDC cap.
+ * Settlement is rejected before the facilitator when the cap would be exceeded.
+ */
+export function createAgentWallet(options: {
+  apiUrl: string;
+  accessToken: string;
+  name: string;
+  publicKey: string;
+  spendLimit: string;
+  endpointId?: string;
+}) {
+  return studioRequest(options.apiUrl, options.accessToken, '/pay/agent-wallets', {
+    name: options.name,
+    publicKey: options.publicKey,
+    spendLimit: options.spendLimit,
+    endpointId: options.endpointId,
+  });
+}
