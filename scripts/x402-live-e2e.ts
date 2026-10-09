@@ -6,7 +6,7 @@
  * makes real paid requests through both integration paths:
  *
  *   1. the hosted resource  GET /api/pay/resource/:slug
- *   2. an Express app protected by @websoroban/pay via the managed proxy
+ *   2. an Express app protected by @web-soroban/pay via the managed proxy
  *
  * and checks the payout account actually received the USDC.
  *
@@ -165,7 +165,7 @@ async function main() {
     step('Paying the hosted resource');
     await pay('Hosted resource', created.endpoint.resourceUrl);
 
-    step('Paying an Express app protected by @websoroban/pay');
+    step('Paying an Express app protected by @web-soroban/pay');
     const merchant = express();
     const sdk = createWebSorobanPay({ apiUrl: apiBase, apiKey: created.apiKey, endpointId: created.endpoint.id, payTo: payee.publicKey() });
     const preflight = await sdk.preflight();

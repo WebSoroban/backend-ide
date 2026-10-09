@@ -1,9 +1,9 @@
-# `@websoroban/pay`
+# `@web-soroban/pay`
 
 x402 payments for Express APIs, settled in USDC on Stellar through WebSoroban's managed facilitator.
 
 ```bash
-npm install @websoroban/pay @x402/core @x402/express @x402/stellar express
+npm install @web-soroban/pay @x402/core @x402/express @x402/stellar express
 ```
 
 Node 22 or newer is required.
@@ -12,7 +12,7 @@ Node 22 or newer is required.
 
 ```ts
 import express from 'express';
-import { createWebSorobanPay } from '@websoroban/pay';
+import { createWebSorobanPay } from '@web-soroban/pay';
 
 const app = express();
 const pay = createWebSorobanPay({
@@ -38,7 +38,7 @@ The network comes from the key prefix. Passing a `network` that disagrees with t
 ## Wallet compatibility
 
 ```ts
-import { AUTH_ENTRY_WALLETS, checkWalletCompatibility } from '@websoroban/pay';
+import { AUTH_ENTRY_WALLETS, checkWalletCompatibility } from '@web-soroban/pay';
 
 checkWalletCompatibility('freighter');        // { supported: true, … }
 checkWalletCompatibility('freighter-mobile'); // { supported: false, guidance: 'Use the desktop extension.' }
@@ -49,7 +49,7 @@ x402 on Stellar needs a wallet that signs Soroban authorization entries: Freight
 ## USDC trustlines
 
 ```ts
-import { checkUsdcTrustline } from '@websoroban/pay';
+import { checkUsdcTrustline } from '@web-soroban/pay';
 
 const report = await checkUsdcTrustline('G…', 'stellar:testnet');
 // report.status: 'ready' | 'missing_account' | 'missing_trustline' | 'not_authorized' | 'not_applicable' | 'unknown'
@@ -58,7 +58,7 @@ const report = await checkUsdcTrustline('G…', 'stellar:testnet');
 ## Webhooks
 
 ```ts
-import { constructWebhookEvent } from '@websoroban/pay';
+import { constructWebhookEvent } from '@web-soroban/pay';
 
 app.post('/webhooks/pay', express.raw({ type: 'application/json' }), (req, res) => {
   const event = constructWebhookEvent(process.env.WEBSOROBAN_WEBHOOK_SECRET!, req.header('X-WebSoroban-Signature'), req.body);

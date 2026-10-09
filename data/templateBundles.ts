@@ -686,7 +686,7 @@ fn factory_bumps_child_via_cross_contract() {
 // ---------------------------------------------------------------------------
 // Paid API endpoint — a runnable Node/TypeScript service protected by x402 on
 // Stellar testnet. The managed adapter is included in the generated tree so the
-// scaffold works before @websoroban/pay is published as a public npm package.
+// scaffold works before @web-soroban/pay is published as a public npm package.
 // ---------------------------------------------------------------------------
 const PAID_API_ENDPOINT: TemplateBundle = {
   manifestPath: 'package.json',

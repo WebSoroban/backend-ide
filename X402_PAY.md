@@ -53,7 +53,7 @@ Each network runs its own x402 resource server and talks to exactly one facilita
 4. **Inspect 402** to confirm the challenge exposes `PAYMENT-REQUIRED`.
 5. Open the hosted checkout, connect Freighter, Hana, HOT, or Klever, and approve the exact authorization. The checkout checks the payer's USDC trustline before asking for a signature.
 6. The checkout shows the settlement transaction and its Stellar Expert receipt.
-7. Protect your own Express service with `@websoroban/pay` using the generated snippet.
+7. Protect your own Express service with `@web-soroban/pay` using the generated snippet.
 8. Settlement success rate, failure reasons with fixes, and webhook delivery state appear in Payment Studio.
 
 The public checkout lives at `/pay/checkout?resource=<encoded-resource-url>` and needs no WebSoroban login. The facilitator sponsors transaction fees; the buyer authorizes only the exact USDC transfer.
@@ -88,7 +88,7 @@ Facilitator reasons such as `insufficient_funds` or `invalid_exact_stellar_paylo
 Register `payment.settled`, `payment.failed`, or `wallet.spend_limit_exceeded`. Deliveries are signed `t=<unix>,v1=<hmac>` over `${timestamp}.${rawBody}` in `X-WebSoroban-Signature`, with `X-WebSoroban-Delivery` and `X-WebSoroban-Event`. Verify with the SDK:
 
 ```ts
-import { constructWebhookEvent } from '@websoroban/pay';
+import { constructWebhookEvent } from '@web-soroban/pay';
 
 app.post('/webhooks/pay', express.raw({ type: 'application/json' }), (req, res) => {
   const event = constructWebhookEvent(process.env.WEBSOROBAN_WEBHOOK_SECRET!, req.header('X-WebSoroban-Signature'), req.body);
