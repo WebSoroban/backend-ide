@@ -27,6 +27,7 @@ import skillsRoutes from './routes/skills';
 import billingRoutes from './routes/billing';
 import dodoWebhookRoutes from './routes/webhooks/dodo';
 import payRoutes from './routes/pay';
+import ideasRoutes from './routes/ideas';
 import { allowedOrigins as corsAllowedOrigins, isAllowedOrigin } from './lib/cors';
 import payloopRoutes from './routes/payloop';
 import { startWebhookDispatcher } from './services/x402Webhooks';
@@ -143,6 +144,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/pay', payRoutes);
 app.use('/api/payloop', payloopRoutes);
+app.use('/api/ideas', ideasRoutes);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
