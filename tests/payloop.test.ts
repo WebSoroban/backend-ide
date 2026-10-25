@@ -48,3 +48,12 @@ test('formats USDC stroops exactly', () => {
   assert.equal(formatUsdc(1n), '0.0000001');
   assert.equal(formatUsdc(-15_000_000n), '-1.5');
 });
+
+test('decodes the ledger from an RPC event cursor', async () => {
+  const { cursorLedger } = await import('../services/payloop/indexer');
+  // toid = ledger << 32 | tx/op order, zero-padded to 19 digits.
+  const endOfLedger = ((5382171n << 32n) | 0xffffffffn).toString().padStart(19, '0');
+  assert.equal(cursorLedger(`${endOfLedger}-4294967295`), 5382171);
+  assert.equal(cursorLedger(`${(5382110n << 32n).toString().padStart(19, '0')}-0000000002`), 5382110);
+  assert.equal(cursorLedger('garbage'), Number.MAX_SAFE_INTEGER, 'unparseable cursors end the scan instead of looping');
+});

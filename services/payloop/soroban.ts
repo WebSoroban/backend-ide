@@ -95,12 +95,41 @@ function describeFailure(result: rpc.Api.GetFailedTransactionResponse): string {
  * Simulate, sign, submit, and wait for a Soroban call. Simulation failures
  * (including contract errors) throw before anything is submitted.
  */
+/** Thrown only when the network confirmed the transaction failed, so it changed nothing. */
+export class ConfirmedFailureError extends SorobanCallError {}
+
+/**
+ * Like `submitCallOnce`, but re-simulates and resubmits when the network
+ * confirms a failure. A Soroban footprint is fixed at simulation, so a
+ * concurrent transaction (e.g. another `create_policy` taking the next policy
+ * id) can make an otherwise valid call trap at execution. A confirmed failure
+ * applied nothing, so retrying is safe; deterministic errors fail again at
+ * simulation, before any fee is spent. Unknown outcomes (timeouts) never retry.
+ */
 export async function submitCall(
   server: rpc.Server,
   passphrase: string,
   signer: Keypair,
   operation: xdr.Operation,
-  options: { inclusionFee?: string; timeoutMs?: number } = {},
+  options: { inclusionFee?: string; timeoutMs?: number; retries?: number } = {},
+): Promise<SubmittedCall> {
+  const retries = options.retries ?? 2;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await submitCallOnce(server, passphrase, signer, operation, options);
+    } catch (error) {
+      if (!(error instanceof ConfirmedFailureError) || attempt >= retries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1_000 * (attempt + 1)));
+    }
+  }
+}
+
+async function submitCallOnce(
+  server: rpc.Server,
+  passphrase: string,
+  signer: Keypair,
+  operation: xdr.Operation,
+  options: { inclusionFee?: string; timeoutMs?: number },
 ): Promise<SubmittedCall> {
   const account = await server.getAccount(signer.publicKey());
   const transaction = new TransactionBuilder(account, {
@@ -135,7 +164,7 @@ export async function submitCall(
       };
     }
     if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
-      throw new SorobanCallError(`Transaction ${sent.hash} failed: ${describeFailure(result)}`);
+      throw new ConfirmedFailureError(`Transaction ${sent.hash} failed: ${describeFailure(result)}`);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }

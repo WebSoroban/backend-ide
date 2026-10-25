@@ -119,8 +119,15 @@ export async function releaseLease(ctx: PayLoopContext, owner: string) {
   });
 }
 
+/** RPC rejects with plain `{ code, message }` objects, not Error instances. */
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) return String((error as { message: unknown }).message);
+  return String(error);
+}
+
 function isRangeError(error: unknown) {
-  return /startLedger must be|ledger range|outside of the ledger range|before the oldest/i.test(error instanceof Error ? error.message : String(error));
+  return /startLedger must be|ledger range|outside of the ledger range|before the oldest/i.test(errorMessage(error));
 }
 
 export interface SyncReport {
@@ -130,30 +137,28 @@ export interface SyncReport {
   latestLedger: number;
   /** True when the RPC retention window forced a jump; reconcile afterwards. */
   gap: boolean;
+  /** Policies found by the count check whose events had been missed. */
+  discovered?: number;
 }
 
 const PAGE = 200;
 
-/**
- * Index contract events since the stored cursor. Charges are recorded once
- * per RPC event id; every touched policy is re-read from the contract, so
- * the index converges to chain state even if an event is skipped.
- */
-export async function syncPayLoop(ctx: PayLoopContext = payloopContext()): Promise<SyncReport> {
-  const report: SyncReport = { events: 0, charges: 0, policies: 0, latestLedger: 0, gap: false };
-  if (!ctx.config.enabled) return report;
-  const { contractId, network } = ctx.config;
-  const state = await prisma.payLoopSyncState.upsert({
-    where: { contractId },
-    create: { contractId, network },
-    update: {},
-  });
-  const filters: rpc.Api.EventFilter[] = [{ type: 'contract', contractIds: [contractId] }];
-  let request: rpc.Api.GetEventsRequest = state.cursor
-    ? { filters, cursor: state.cursor, limit: PAGE }
-    : { filters, startLedger: Math.max(ctx.config.startLedger, 1), limit: PAGE };
-  const touched = new Set<bigint>();
+/** Ledgers re-scanned on every sync. RPC can report a ledger as latest before
+ * all of its events are queryable, so never trust an opaque forward-only
+ * cursor: resume a little before the last ledger and rely on idempotency. */
+export const OVERLAP_LEDGERS = 30;
+const DISCOVERY_RESCAN_LEDGERS = 17_280;
 
+/**
+ * Scan contract events from `startLedger` to the RPC's latest ledger. Charges
+ * are recorded once per RPC event id (re-scans are no-ops) and every touched
+ * policy id is collected for a fresh read from the contract.
+ */
+async function scanEvents(ctx: PayLoopContext, startLedger: number, touched: Set<bigint>, report: SyncReport) {
+  const { contractId } = ctx.config;
+  const filters: rpc.Api.EventFilter[] = [{ type: 'contract', contractIds: [contractId] }];
+  let request: rpc.Api.GetEventsRequest = { filters, startLedger: Math.max(startLedger, 1), limit: PAGE };
+  let lastCursor = '';
   for (;;) {
     let page: rpc.Api.GetEventsResponse;
     try {
@@ -170,7 +175,9 @@ export async function syncPayLoop(ctx: PayLoopContext = payloopContext()): Promi
     report.latestLedger = page.latestLedger;
 
     for (const event of page.events) {
-      if (!event.inSuccessfulContractCall) continue;
+      // Protocol 23+ RPC omits this field because failed calls emit no events;
+      // only an explicit false marks an event from a failed call.
+      if ((event as { inSuccessfulContractCall?: boolean }).inSuccessfulContractCall === false) continue;
       report.events += 1;
       const name = String(scValToNative(event.topic[0]));
       const policyId = BigInt(scValToNative(event.topic[1]));
@@ -205,14 +212,66 @@ export async function syncPayLoop(ctx: PayLoopContext = payloopContext()): Promi
       report.charges += created.count;
     }
 
-    await prisma.payLoopSyncState.update({
-      where: { contractId },
-      data: { cursor: page.cursor, lastLedger: page.latestLedger },
-    });
-    if (page.events.length < PAGE) break;
+    // RPC scans a bounded ledger window per request (10,000 ledgers), so a
+    // short or empty page does not mean the end. Stop only once the cursor has
+    // reached the latest ledger, or if it stops advancing.
+    if (cursorLedger(page.cursor) >= page.latestLedger || page.cursor === lastCursor) break;
+    lastCursor = page.cursor;
     request = { filters, cursor: page.cursor, limit: PAGE };
   }
+}
 
+/** Ledger encoded in an RPC event cursor (`<toid>-<index>`; ledger = toid >> 32). */
+export function cursorLedger(cursor: string): number {
+  try {
+    return Number(BigInt(cursor.split('-')[0]) >> 32n);
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+/**
+ * Index contract events since the last synced ledger (minus an overlap), then
+ * re-read every touched policy from the contract so the index converges on
+ * chain state. A safety net compares the contract's policy count with the
+ * index: any policy whose events were never seen is indexed directly, and the
+ * past day is re-scanned for its charges.
+ */
+export async function syncPayLoop(ctx: PayLoopContext = payloopContext()): Promise<SyncReport> {
+  const report: SyncReport = { events: 0, charges: 0, policies: 0, latestLedger: 0, gap: false };
+  if (!ctx.config.enabled) return report;
+  const { contractId, network } = ctx.config;
+  const state = await prisma.payLoopSyncState.upsert({
+    where: { contractId },
+    create: { contractId, network },
+    update: {},
+  });
+  const touched = new Set<bigint>();
+  const resumeFrom = state.lastLedger > 0
+    ? Math.max(state.lastLedger - OVERLAP_LEDGERS, ctx.config.startLedger)
+    : ctx.config.startLedger;
+  await scanEvents(ctx, resumeFrom, touched, report);
+
+  // Policy ids are sequential, so any id up to the on-chain count that the
+  // index lacks was missed (or predates the RPC retention window).
+  const onChain = await readPolicyCount(ctx);
+  const indexedCount = BigInt(await prisma.payLoopPolicy.count({ where: { contractId } }));
+  if (onChain > indexedCount) {
+    const indexed = new Set((await prisma.payLoopPolicy.findMany({ where: { contractId }, select: { policyId: true } })).map((row) => row.policyId));
+    const missing: bigint[] = [];
+    for (let id = 1n; id <= onChain; id += 1n) if (!indexed.has(id) && !touched.has(id)) missing.push(id);
+    if (missing.length) {
+      missing.forEach((id) => touched.add(id));
+      const back = Math.max(report.latestLedger - DISCOVERY_RESCAN_LEDGERS, ctx.config.startLedger);
+      await scanEvents(ctx, back, touched, report);
+      report.discovered = missing.length;
+    }
+  }
+
+  await prisma.payLoopSyncState.update({
+    where: { contractId },
+    data: { lastLedger: report.latestLedger, cursor: null },
+  });
   for (const policyId of touched) await refreshPolicy(ctx, policyId);
   report.policies = touched.size;
   return report;
