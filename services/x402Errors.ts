@@ -67,6 +67,12 @@ export const X402_ERROR_CATALOG: X402ErrorInfo[] = [
     fix: 'Use a testnet endpoint, or ask the operator to configure the mainnet facilitator.',
   },
   {
+    code: 'FEE_BELOW_MINIMUM',
+    message: 'Network fees moved between signing and verification, so the facilitator asked for a new signature.',
+    cause: 'The payment transaction was simulated with a resource fee that was below the facilitator\'s fresh estimate a few seconds later. Nothing was charged.',
+    fix: 'Retry the payment. The hosted checkout and `pnpm pay` retry once automatically.',
+  },
+  {
     code: 'FACILITATOR_REJECTED',
     message: 'The facilitator rejected the payment.',
     cause: 'The upstream facilitator returned an error that does not match a known failure.',
@@ -93,6 +99,7 @@ export function explainX402Error(code: string | null | undefined): X402ErrorInfo
 // errors use prose, so word gaps match either a space or an underscore.
 const RULES: Array<{ test: RegExp; code: string }> = [
   { test: /timeout|timed[ _]out|abort/i, code: 'FACILITATOR_TIMEOUT' },
+  { test: /fee[ _]below[ _]minimum/i, code: 'FEE_BELOW_MINIMUM' },
   { test: /spend[ _]limit/i, code: 'SPEND_LIMIT_EXCEEDED' },
   { test: /trustline|trust[ _]line|no[ _]trust/i, code: 'TRUSTLINE_MISSING' },
   { test: /insufficient|allowance|underfunded|balance/i, code: 'INSUFFICIENT_BALANCE_OR_ALLOWANCE' },

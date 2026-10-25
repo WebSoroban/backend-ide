@@ -49,6 +49,8 @@ test('maps facilitator reasons onto readable catalog codes', () => {
   assert.equal(classifyFacilitatorReason('insufficient_funds'), 'INSUFFICIENT_BALANCE_OR_ALLOWANCE')
   assert.equal(classifyFacilitatorReason('invalid_exact_stellar_payload_simulation_failed', 'trustline entry is missing'), 'TRUSTLINE_MISSING')
   assert.equal(classifyFacilitatorReason('network_mismatch'), 'NETWORK_MISMATCH')
+  // Observed live on OpenZeppelin Channels (production probe, 2026-10-25).
+  assert.equal(classifyFacilitatorReason('invalid_exact_stellar_payload_fee_below_minimum'), 'FEE_BELOW_MINIMUM')
   assert.equal(classifyFacilitatorReason('invalid_exact_stellar_payload_wrong_amount'), 'invalid_exact_stellar_payload_wrong_amount')
   assert.equal(classifyFacilitatorReason(null, null), null)
 })

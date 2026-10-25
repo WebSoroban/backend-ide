@@ -959,13 +959,24 @@ const signer = createEd25519Signer(secret, 'stellar:testnet');
 const client = new x402Client().register('stellar:*', new ExactStellarScheme(signer, { url: 'https://soroban-testnet.stellar.org' }));
 const paidFetch = wrapFetchWithPayment(fetch, client);
 
-const response = await paidFetch(url, { headers: { Accept: 'application/json' } });
+const httpClient = new x402HTTPClient(client);
+const rejection = (res: Response) => {
+  try { return String(httpClient.getPaymentRequiredResponse((name) => res.headers.get(name)).error || ''); } catch { return ''; }
+};
+let response = await paidFetch(url, { headers: { Accept: 'application/json' } });
+// The facilitator re-simulates at verification. If network fees moved in the
+// seconds since signing it rejects with fee_below_minimum and charges nothing,
+// so sign once more (never more than once).
+if (response.status === 402 && /fee[ _]below[ _]minimum/i.test(rejection(response))) {
+  console.log('Network fees moved while signing; nothing was charged. Retrying once…');
+  response = await paidFetch(url, { headers: { Accept: 'application/json' } });
+}
 const body = await response.json().catch(() => ({}));
 if (!response.ok) {
   console.error(\`Payment failed with HTTP \${response.status}:\`, body);
   process.exit(1);
 }
-const settlement = new x402HTTPClient(client).getPaymentSettleResponse((name) => response.headers.get(name));
+const settlement = httpClient.getPaymentSettleResponse((name) => response.headers.get(name));
 console.log('Paid response:', body);
 if (settlement?.transaction) {
   console.log(\`Receipt: https://stellar.expert/explorer/testnet/tx/\${settlement.transaction}\`);
