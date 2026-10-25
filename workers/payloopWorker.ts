@@ -27,8 +27,11 @@ async function tick() {
   const events = before.events + (after?.events || 0);
   const payments = before.charges + (after?.charges || 0);
   const gap = before.gap || Boolean(after?.gap);
-  if (relayed.attempted || events || gap) {
-    console.log(`[PayLoop] ledger ${(after || before).latestLedger}: ${events} events, ${payments} payments indexed; relayed ${relayed.charged} charged, ${relayed.uncovered} uncovered, ${relayed.errors} errors${gap ? ' (retention gap — run reconcile)' : ''}`);
+  const discovered = (before.discovered || 0) + (after?.discovered || 0);
+  // Every sync re-reads a small overlap of recent ledgers, so `events` is
+  // rarely zero; log only when something new happened.
+  if (relayed.attempted || payments || gap || discovered) {
+    console.log(`[PayLoop] ledger ${(after || before).latestLedger}: ${events} events, ${payments} payments indexed; relayed ${relayed.charged} charged, ${relayed.uncovered} uncovered, ${relayed.errors} errors${discovered ? `; indexed ${discovered} missed policies` : ''}${gap ? ' (retention gap — run reconcile)' : ''}`);
   }
 }
 

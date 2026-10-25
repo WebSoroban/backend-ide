@@ -122,3 +122,32 @@ resume, and revoke worked from the subscriber key, and reconciliation matched
   findings and their fixes, is `contracts/payloop/AUDIT.md`.
 - A dedicated relayer account with fee monitoring and alerting.
 - Alerting on worker tick failures, retention gaps, and reconciliation mismatches.
+
+## Mainnet launch runbook
+
+Already prepared on Railway (project `soothing-appreciation`):
+
+- Service `payloop-worker-mainnet`, **no source connected**, so it cannot
+  deploy. Variables: `PAYLOOP_NETWORK=mainnet`, database and mainnet
+  RPC/Horizon referenced from `backend-ide`, start command
+  `node dist/workers/payloopWorker.js`, Dockerfile `/Dockerfiles/Dockerfile.billing`.
+- A dedicated mainnet relayer account, `GDHWVODNRWJZGKWMXXIOYU4AX35BG5XKYT3NIQALVNS44KQRRWOS3U7E`.
+  Its secret is stored only in that service's `PAYLOOP_RELAYER_SECRET`. It is
+  not funded and holds no customer funds.
+
+Launch, in order, only after the independent review is complete:
+
+1. Confirm the reviewed commit builds to the reviewed wasm hash
+   (`stellar contract build`, then `shasum -a 256`).
+2. Deploy: `PAYLOOP_DEPLOYER_SECRET=<funded mainnet key> PAYLOOP_MAINNET_AUDITED=yes npm run payloop:deploy -- mainnet`.
+   Commit `contracts/payloop/deployments/mainnet.json`.
+3. Fund the relayer account with XLM for fees (each charge costs well under
+   0.01 XLM; 50 XLM covers thousands).
+4. Push the commit to `main`, then connect `payloop-worker-mainnet` to
+   `harshdev2909/backend-ide` on `main`. Check its first log line names the
+   mainnet contract, and that `npm run payloop:reconcile` with
+   `PAYLOOP_NETWORK=mainnet` reports 0 mismatches.
+5. Decide how the API exposes mainnet. `/api/payloop` serves the single
+   network in the API's `PAYLOOP_NETWORK`. Switching it to `mainnet` moves the
+   public demo to real funds. Serving both networks side by side needs a
+   network parameter on the PayLoop routes and pages.
