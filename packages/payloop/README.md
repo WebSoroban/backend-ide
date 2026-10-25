@@ -20,11 +20,12 @@ npm install @web-soroban/payloop @stellar/stellar-sdk
 | --- | --- | --- |
 | USDC | Circle test USDC (`CBIELTK6…`) | Circle USDC (`CCW67TSZ…`) |
 | RPC | `https://soroban-testnet.stellar.org` (default) | Your provider's URL (pass `rpcUrl`) |
-| Contract | Read from the WebSoroban API | Read from the WebSoroban API |
+| Contract | `CCNMZWP2NQMTJF2J42W4DNYNOAQQYWOCJ2IQROXWYSJVOI3DKSH7YRIH` | `CDQ6I65CP3JHLNGMEHWE4BP2OMLWOUMZ77U53JPAURFZPZBVH6PYEXPN` |
 
-Mainnet moves real USDC. The PayLoop contract has had an internal security
-review, and `GET /api/payloop/config` reports `audited` for the mainnet
-deployment. Check it before you take customer funds.
+The client reads the contract id from the WebSoroban API, so you don't need to
+pass it. Mainnet moves real USDC. The contract has had an internal security
+review but no independent audit yet; `GET /api/payloop/config?network=mainnet`
+reports `audited`. Check it before you take customer funds.
 
 Both the subscriber and the merchant need a USDC trustline on the network you
 use.

@@ -151,33 +151,25 @@ README. Build and publish: `cd packages/payloop && npm publish`.
   0.01 XLM. Alert on worker tick failures, retention gaps, and reconciliation
   mismatches.
 
-## Mainnet launch runbook
+## Deployments
 
-Already prepared on Railway (project `soothing-appreciation`):
+| | Testnet | Mainnet |
+| --- | --- | --- |
+| Contract | `CCNMZWP2NQMTJF2J42W4DNYNOAQQYWOCJ2IQROXWYSJVOI3DKSH7YRIH` | `CDQ6I65CP3JHLNGMEHWE4BP2OMLWOUMZ77U53JPAURFZPZBVH6PYEXPN` |
+| Wasm hash | `d42be154…a19318` | `d42be154…a19318` (same build) |
+| Token | Circle test USDC | Circle USDC (`CCW67TSZ…MI75`) |
+| Review | internal | internal only (`audited: false`) |
+| Relayer | Railway `payloop-worker` | Railway `payloop-worker-mainnet`, `GDHWVODN…3U7E` |
+| Deployed | 2026-10-09 | 2026-10-25, ledger 65131811 |
 
-- Service `payloop-worker-mainnet`, **no source connected**, so it cannot
-  deploy. Variables: `PAYLOOP_NETWORK=mainnet`, database and mainnet
-  RPC/Horizon referenced from `backend-ide`, start command
-  `node dist/workers/payloopWorker.js`, Dockerfile `/Dockerfiles/Dockerfile.billing`.
-- A dedicated mainnet relayer account, `GDHWVODNRWJZGKWMXXIOYU4AX35BG5XKYT3NIQALVNS44KQRRWOS3U7E`.
-  Its secret is stored only in that service's `PAYLOOP_RELAYER_SECRET`. It is
-  not funded and holds no customer funds.
+Mainnet launched on 2026-10-25 after the internal review, without an
+independent audit; `contracts/payloop/AUDIT.md` records the decision. The
+mainnet demo merchant is the deployer account (`GAS3763…MKVQ`), which holds a
+Circle USDC trustline. Relayer secrets live only in the Railway service
+variables.
 
-Launch, in order:
-
-1. Confirm the reviewed commit builds to the reviewed wasm hash
-   (`stellar contract build`, then `shasum -a 256`).
-2. Deploy: `PAYLOOP_DEPLOYER_SECRET=<funded mainnet key> PAYLOOP_MAINNET_AUDITED=yes npm run payloop:deploy -- mainnet`
-   (or `PAYLOOP_ACCEPT_UNAUDITED_MAINNET=yes` for an internally reviewed launch).
-   Commit `contracts/payloop/deployments/mainnet.json`.
-3. Fund the relayer account with XLM for fees (each charge costs well under
-   0.01 XLM; 50 XLM covers thousands).
-4. Push the commit to `main`, then connect `payloop-worker-mainnet` to
-   `harshdev2909/backend-ide` on `main`. Check its first log line names the
-   mainnet contract, and that `npm run payloop:reconcile -- mainnet` reports
-   0 mismatches.
-5. Set `PAYLOOP_MAINNET_DEMO_MERCHANT` on `backend-ide` (a mainnet address with
-   a Circle USDC trustline). The API picks up the committed manifest on its
-   next deploy, and `/payloop?network=mainnet` goes live.
-6. Make one small real subscription, watch the second charge land, revoke it,
-   and reconcile again.
+To redeploy on mainnet: build the reviewed commit, check the wasm hash
+(`shasum -a 256`), run
+`PAYLOOP_DEPLOYER_SECRET=<funded key> PAYLOOP_MAINNET_AUDITED=yes npm run payloop:deploy -- mainnet`
+(the upload alone costs about 19 XLM in storage fees), commit the manifest,
+redeploy the API and `payloop-worker-mainnet`, and reconcile.

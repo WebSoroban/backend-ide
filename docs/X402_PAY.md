@@ -144,7 +144,7 @@ An agent wallet caps a signer's daily USDC spend (`spendingLimitStroops`, `perio
   `ADMIN_EMAILS`, `X402_INTERNAL_EMAILS`, and `X402_INTERNAL_DOMAINS`.
 - The funnel: created an endpoint → served a 402 → was paid (and via the SDK).
 - **Time from endpoint creation to first paid request**: median, p75, and
-  the count within 30 minutes. The KR1.1 session protocol is in `X402_STUDY.md`.
+  the count within 30 minutes.
 
 ## Testing
 

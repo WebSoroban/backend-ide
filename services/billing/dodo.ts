@@ -4,7 +4,7 @@
  *
  * Environment is gated by env (DODO_PAYMENTS_ENVIRONMENT). In `live_mode` Dodo
  * creates REAL, purchasable products and processes REAL charges; use `test_mode`
- * for development (test card 4242 4242 4242 4242). See BILLING.md.
+ * for development (test card 4242 4242 4242 4242). See docs/BILLING.md.
  */
 import DodoPayments from 'dodopayments';
 import { Webhook } from 'standardwebhooks';

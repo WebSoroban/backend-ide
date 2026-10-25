@@ -78,14 +78,25 @@ High issues and no way for a non-subscriber to move more than a policy permits.
   creation fail auth, and the client retries.
 - No admin, no pause switch, no upgrade.
 
+## Mainnet status
+
+Deployed to mainnet on 2026-10-25 as
+`CDQ6I65CP3JHLNGMEHWE4BP2OMLWOUMZ77U53JPAURFZPZBVH6PYEXPN`
+(wasm `d42be154c35ac597792f41d83ccf1d70abd29edebdec135a44ce31fd78a19318`, the
+same build as testnet), **after the internal review only**. No independent
+audit has been completed; `deployments/mainnet.json` records `"audited": false`,
+the API reports it, and the PayLoop page shows an unaudited notice on mainnet.
+When an independent review of this wasm completes, set `"audited": true` in
+the manifest. Any contract change requires a new deployment.
+
 ## Reproduce
 
 ```bash
 cd contracts/payloop
 cargo test
 stellar contract build
-shasum -a 256 target/wasm32v1-none/release/payloop.wasm   # compare with deployments/testnet.json
+shasum -a 256 target/wasm32v1-none/release/payloop.wasm   # compare with deployments/<network>.json
 ```
 
 Live behaviour on testnet: `npx tsx scripts/payloop-soak.ts 3 20 60` with the
-worker running (see `PAYLOOP.md`).
+worker running (see `docs/PAYLOOP.md`).

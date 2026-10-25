@@ -8,7 +8,7 @@ import { CREDIT_PACKS } from '../services/billing/config';
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │  WARNING: with DODO_PAYMENTS_ENVIRONMENT=live_mode this creates REAL,      │
  * │  purchasable products that take REAL money. Use test_mode while developing │
- * │  (test card 4242 4242 4242 4242). See BILLING.md.                          │
+ * │  (test card 4242 4242 4242 4242). See docs/BILLING.md.                          │
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * IDEMPOTENT: matches existing products by metadata.pack (our key) or name and
