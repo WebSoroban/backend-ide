@@ -3,6 +3,15 @@
   "version": "0.2.1",
   "description": "x402 payments for Express APIs, settled in USDC on Stellar through WebSoroban's managed facilitator",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WebSoroban/x402-kit.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/WebSoroban/x402-kit#readme",
+  "bugs": {
+    "url": "https://github.com/WebSoroban/x402-kit/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

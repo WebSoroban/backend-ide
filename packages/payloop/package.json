@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Non-custodial USDC subscriptions on Stellar: build, sign, and track PayLoop policies on testnet or mainnet",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WebSoroban/payloop.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/WebSoroban/payloop#readme",
+  "bugs": {
+    "url": "https://github.com/WebSoroban/payloop/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
