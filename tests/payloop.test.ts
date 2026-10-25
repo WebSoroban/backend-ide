@@ -57,3 +57,30 @@ test('decodes the ledger from an RPC event cursor', async () => {
   assert.equal(cursorLedger(`${(5382110n << 32n).toString().padStart(19, '0')}-0000000002`), 5382110);
   assert.equal(cursorLedger('garbage'), Number.MAX_SAFE_INTEGER, 'unparseable cursors end the scan instead of looping');
 });
+
+test('resolves PayLoop config per network', async () => {
+  const { payloopConfig, demoMerchant } = await import('../services/payloop/config');
+  const saved = { ...process.env };
+  try {
+    delete process.env.PAYLOOP_CONTRACT_ID_MAINNET;
+    delete process.env.PAYLOOP_CONTRACT_ID;
+    process.env.PAYLOOP_NETWORK = 'testnet';
+    // Testnet comes from the committed manifest; mainnet is off until deployed.
+    assert.equal(payloopConfig('testnet').enabled, true);
+    if (!require('node:fs').existsSync('contracts/payloop/deployments/mainnet.json')) {
+      assert.equal(payloopConfig('mainnet').enabled, false);
+    }
+    process.env.PAYLOOP_CONTRACT_ID_MAINNET = 'CMAINNETCONTRACT';
+    assert.equal(payloopConfig('mainnet').contractId, 'CMAINNETCONTRACT');
+    // The unsuffixed variable only applies to PAYLOOP_NETWORK.
+    process.env.PAYLOOP_CONTRACT_ID = 'CTESTNETOVERRIDE';
+    assert.equal(payloopConfig('testnet').contractId, 'CTESTNETOVERRIDE');
+    assert.equal(payloopConfig('mainnet').contractId, 'CMAINNETCONTRACT');
+    process.env.PAYLOOP_MAINNET_DEMO_MERCHANT = 'GMAINNET';
+    process.env.PAYLOOP_DEMO_MERCHANT = 'GTESTNET';
+    assert.equal(demoMerchant('mainnet'), 'GMAINNET');
+    assert.equal(demoMerchant('testnet'), 'GTESTNET');
+  } finally {
+    process.env = saved;
+  }
+});

@@ -21,6 +21,8 @@ export interface PayLoopDeployment {
   ledger: number;
   deployer: string;
   deployedAt: string;
+  /** Mainnet only: whether an independent security review preceded this deployment. */
+  audited?: boolean;
 }
 
 export function deploymentFile(network: NetworkId): string {
@@ -48,21 +50,41 @@ export interface PayLoopConfig {
  * PAYLOOP_CONTRACT_ID wins over the committed deployment manifest, so an
  * operator can point a server at a new deployment without a code change.
  */
-export function payloopConfig(): PayLoopConfig {
-  const network = coerceNetwork(process.env.PAYLOOP_NETWORK?.trim() || 'testnet');
+/** The network a single-network process (the worker) runs on. */
+export function defaultPayLoopNetwork(): NetworkId {
+  return coerceNetwork(process.env.PAYLOOP_NETWORK?.trim() || 'testnet');
+}
+
+function networkEnv(network: NetworkId, name: string): string {
+  // PAYLOOP_CONTRACT_ID_MAINNET etc. win; the unsuffixed variable applies to
+  // PAYLOOP_NETWORK only, so an older single-network setup keeps working.
+  const suffixed = process.env[`${name}_${network.toUpperCase()}`]?.trim();
+  if (suffixed) return suffixed;
+  return network === defaultPayLoopNetwork() ? process.env[name]?.trim() || '' : '';
+}
+
+export function payloopConfig(network: NetworkId = defaultPayLoopNetwork()): PayLoopConfig {
   const net = getNetwork(network);
   const manifest = readDeployment(network);
-  const contractId = process.env.PAYLOOP_CONTRACT_ID?.trim() || manifest?.contractId || '';
+  const contractId = networkEnv(network, 'PAYLOOP_CONTRACT_ID') || manifest?.contractId || '';
   return {
     enabled: Boolean(contractId),
     network,
     contractId,
-    token: process.env.PAYLOOP_TOKEN?.trim() || manifest?.token || PAYLOOP_TOKENS[network],
-    startLedger: Number(process.env.PAYLOOP_START_LEDGER) || manifest?.ledger || 0,
+    token: networkEnv(network, 'PAYLOOP_TOKEN') || manifest?.token || PAYLOOP_TOKENS[network],
+    startLedger: Number(networkEnv(network, 'PAYLOOP_START_LEDGER')) || manifest?.ledger || 0,
     rpcUrl: net.rpcUrl,
     passphrase: net.passphrase,
     explorerBase: net.explorerBase,
   };
+}
+
+/** Demo merchant pre-filled on the PayLoop page for a network, if configured. */
+export function demoMerchant(network: NetworkId): string | null {
+  const value = network === 'mainnet'
+    ? process.env.PAYLOOP_MAINNET_DEMO_MERCHANT?.trim()
+    : process.env.PAYLOOP_DEMO_MERCHANT?.trim();
+  return value || null;
 }
 
 /** The account that submits charges and pays their fees. It holds no customer funds. */

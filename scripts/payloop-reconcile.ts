@@ -2,13 +2,15 @@
  * Reconcile the PayLoop index with the contract: every policy's terms, state,
  * and charge history must match. Exits 1 on any mismatch (for cron/CI).
  *
- *   npm run payloop:reconcile
+ *   npm run payloop:reconcile [-- testnet|mainnet]   (default: PAYLOOP_NETWORK or testnet)
  */
 import 'dotenv/config';
 import prisma from '../lib/prisma';
-import { reconcilePayLoop } from '../services/payloop/indexer';
+import { coerceNetwork } from '../lib/networks';
+import { defaultPayLoopNetwork } from '../services/payloop/config';
+import { payloopContext, reconcilePayLoop } from '../services/payloop/indexer';
 
-reconcilePayLoop()
+reconcilePayLoop(payloopContext(process.argv[2] ? coerceNetwork(process.argv[2]) : defaultPayLoopNetwork()))
   .then((report) => {
     console.log(`PayLoop ${report.contractId}: ${report.matched}/${report.checked} policies match the chain.`);
     for (const mismatch of report.mismatches) {

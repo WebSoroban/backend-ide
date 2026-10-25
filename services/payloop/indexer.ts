@@ -1,5 +1,6 @@
 import { nativeToScVal, rpc, scValToNative } from '@stellar/stellar-sdk';
 import prisma from '../../lib/prisma';
+import type { NetworkId } from '../../lib/networks';
 import { payloopConfig, type PayLoopConfig } from './config';
 import { rpcServer, simulateRead } from './soroban';
 
@@ -44,8 +45,8 @@ export interface PayLoopContext {
   server: rpc.Server;
 }
 
-export function payloopContext(): PayLoopContext {
-  const config = payloopConfig();
+export function payloopContext(network?: NetworkId): PayLoopContext {
+  const config = payloopConfig(network);
   return { config, server: rpcServer(config.rpcUrl) };
 }
 

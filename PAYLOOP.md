@@ -12,7 +12,12 @@ services/payloop/         config, Soroban RPC helpers, indexer, relayer
 workers/payloopWorker.ts  indexer + relayer loop (one active instance via lease)
 routes/payloop.ts         /api/payloop: config, policies, charges, stats, reconcile
 scripts/payloop-*.ts      deploy, reconcile, live soak test
+packages/payloop/         @web-soroban/payloop SDK (testnet + mainnet)
 ```
+
+PayLoop runs on testnet and mainnet side by side: one contract, one relayer
+worker, and one index per network. The API serves both, selected with
+`?network=`.
 
 ## Contract
 
@@ -59,17 +64,29 @@ npm run payloop:deploy -- testnet
 The script uploads the wasm, creates the instance with the USDC SAC as its
 token, reads `token()` back, and writes `contracts/payloop/deployments/testnet.json`.
 On testnet it funds a throwaway deployer; set `PAYLOOP_DEPLOYER_SECRET` to use
-your own. **Mainnet is refused until the independent review is complete**
-(`PAYLOOP_MAINNET_AUDITED=yes`).
+your own. On mainnet the script requires one of two explicit acknowledgements:
 
-Current testnet deployment: see `contracts/payloop/deployments/testnet.json`.
+- `PAYLOOP_MAINNET_AUDITED=yes`: an independent review of this exact wasm is
+  complete. Records `"audited": true`.
+- `PAYLOOP_ACCEPT_UNAUDITED_MAINNET=yes`: launch on the internal review only.
+  Records `"audited": false`; the API reports it and the PayLoop page shows an
+  unaudited notice on mainnet.
+
+Deployments: `contracts/payloop/deployments/<network>.json`.
 
 ## Run the worker
 
+One worker per network. Each worker reads only `PAYLOOP_NETWORK`:
+
 ```env
-PAYLOOP_NETWORK=testnet
-PAYLOOP_RELAYER_SECRET=S…   # funded with XLM for fees; holds no customer funds
+PAYLOOP_NETWORK=testnet     # or mainnet
+PAYLOOP_RELAYER_SECRET=S…   # that network's relayer; XLM for fees, no customer funds
 ```
+
+Per-network overrides for the API process: `PAYLOOP_CONTRACT_ID_MAINNET`,
+`PAYLOOP_START_LEDGER_MAINNET` (and `_TESTNET`). The unsuffixed variables apply
+to `PAYLOOP_NETWORK` only. Demo merchants: `PAYLOOP_DEMO_MERCHANT` (testnet),
+`PAYLOOP_MAINNET_DEMO_MERCHANT` (mainnet).
 
 ```bash
 npm run migrate:deploy
@@ -92,7 +109,7 @@ from the oldest available ledger and logs a gap. Run reconciliation afterwards.
 ## Verify
 
 ```bash
-npm run payloop:reconcile                     # exit 1 on any index/chain difference
+npm run payloop:reconcile -- mainnet          # exit 1 on any index/chain difference (default: PAYLOOP_NETWORK)
 npx tsx scripts/payloop-soak.ts 3 20 60       # live testnet soak (worker must be running)
 ```
 
@@ -109,19 +126,30 @@ resume, and revoke worked from the subscriber key, and reconciliation matched
 
 ## API
 
-- `GET /api/payloop/config`: network, contract id, token, explorer
+Every route takes `?network=testnet|mainnet` (default `testnet`). A network
+with no deployment returns 404.
+
+- `GET /api/payloop/config`: network, contract id, token, explorer, demo
+  merchant, `networks` (which are deployed), `audited` (mainnet)
 - `GET /api/payloop/policies?subscriber=…|merchant=…[&status=]`
 - `GET /api/payloop/policies/:id`: policy plus its last 50 charges
 - `GET /api/payloop/stats`: policies by status, charge outcomes, on-schedule metrics
 - `POST /api/payloop/reconcile`: admin only
 
-## Before mainnet
+## SDK
 
-- Independent security review of `contracts/payloop` (no mainnet funds before
-  it). The package for the reviewers, including the internal review's
-  findings and their fixes, is `contracts/payloop/AUDIT.md`.
-- A dedicated relayer account with fee monitoring and alerting.
-- Alerting on worker tick failures, retention gaps, and reconciliation mismatches.
+`packages/payloop` is published as `@web-soroban/payloop`. It builds unsigned
+contract calls for any wallet, submits with confirmed-failure retry, reads
+policies from the contract and the API, and verifies SEP-53 signatures. See its
+README. Build and publish: `cd packages/payloop && npm publish`.
+
+## Mainnet operations
+
+- `contracts/payloop/AUDIT.md` is the reviewer package and records whether the
+  live deployment was independently audited.
+- Watch the mainnet relayer's XLM balance; each charge costs well under
+  0.01 XLM. Alert on worker tick failures, retention gaps, and reconciliation
+  mismatches.
 
 ## Mainnet launch runbook
 
@@ -135,19 +163,21 @@ Already prepared on Railway (project `soothing-appreciation`):
   Its secret is stored only in that service's `PAYLOOP_RELAYER_SECRET`. It is
   not funded and holds no customer funds.
 
-Launch, in order, only after the independent review is complete:
+Launch, in order:
 
 1. Confirm the reviewed commit builds to the reviewed wasm hash
    (`stellar contract build`, then `shasum -a 256`).
-2. Deploy: `PAYLOOP_DEPLOYER_SECRET=<funded mainnet key> PAYLOOP_MAINNET_AUDITED=yes npm run payloop:deploy -- mainnet`.
+2. Deploy: `PAYLOOP_DEPLOYER_SECRET=<funded mainnet key> PAYLOOP_MAINNET_AUDITED=yes npm run payloop:deploy -- mainnet`
+   (or `PAYLOOP_ACCEPT_UNAUDITED_MAINNET=yes` for an internally reviewed launch).
    Commit `contracts/payloop/deployments/mainnet.json`.
 3. Fund the relayer account with XLM for fees (each charge costs well under
    0.01 XLM; 50 XLM covers thousands).
 4. Push the commit to `main`, then connect `payloop-worker-mainnet` to
    `harshdev2909/backend-ide` on `main`. Check its first log line names the
-   mainnet contract, and that `npm run payloop:reconcile` with
-   `PAYLOOP_NETWORK=mainnet` reports 0 mismatches.
-5. Decide how the API exposes mainnet. `/api/payloop` serves the single
-   network in the API's `PAYLOOP_NETWORK`. Switching it to `mainnet` moves the
-   public demo to real funds. Serving both networks side by side needs a
-   network parameter on the PayLoop routes and pages.
+   mainnet contract, and that `npm run payloop:reconcile -- mainnet` reports
+   0 mismatches.
+5. Set `PAYLOOP_MAINNET_DEMO_MERCHANT` on `backend-ide` (a mainnet address with
+   a Circle USDC trustline). The API picks up the committed manifest on its
+   next deploy, and `/payloop?network=mainnet` goes live.
+6. Make one small real subscription, watch the second charge land, revoke it,
+   and reconcile again.

@@ -8,8 +8,10 @@
  * PAYLOOP_DEPLOYER_SECRET signs the upload and deploy. On testnet a throwaway
  * deployer is created and funded with Friendbot when it is not set.
  *
- * Mainnet is refused unless PAYLOOP_MAINNET_AUDITED=yes: no mainnet funds
- * before an independent review of the contract.
+ * Mainnet is refused unless the contract has passed an independent review
+ * (PAYLOOP_MAINNET_AUDITED=yes) or the operator explicitly accepts launching
+ * without one (PAYLOOP_ACCEPT_UNAUDITED_MAINNET=yes). The choice is recorded in
+ * the deployment manifest as `audited`.
  */
 import 'dotenv/config';
 import { createHash, randomBytes } from 'node:crypto';
@@ -35,8 +37,12 @@ async function deployerKeypair(network: 'testnet' | 'mainnet') {
 
 async function main() {
   const network = coerceNetwork(process.argv[2] || 'testnet');
-  if (network === 'mainnet' && process.env.PAYLOOP_MAINNET_AUDITED !== 'yes') {
-    throw new Error('Refusing to deploy PayLoop to mainnet without a completed independent review (set PAYLOOP_MAINNET_AUDITED=yes once it is done).');
+  const audited = process.env.PAYLOOP_MAINNET_AUDITED === 'yes';
+  if (network === 'mainnet' && !audited) {
+    if (process.env.PAYLOOP_ACCEPT_UNAUDITED_MAINNET !== 'yes') {
+      throw new Error('Refusing to deploy PayLoop to mainnet without a completed independent review. Set PAYLOOP_MAINNET_AUDITED=yes once it is done, or PAYLOOP_ACCEPT_UNAUDITED_MAINNET=yes to launch knowingly without one.');
+    }
+    console.warn('WARNING: deploying PayLoop to mainnet WITHOUT an independent security review. Recording audited=false in the manifest.');
   }
   const config = getNetwork(network);
   const server = rpcServer(config.rpcUrl);
@@ -70,6 +76,7 @@ async function main() {
     ledger: created.ledger,
     deployer: deployer.publicKey(),
     deployedAt: new Date().toISOString(),
+    ...(network === 'mainnet' ? { audited } : {}),
   };
   mkdirSync(path.dirname(deploymentFile(network)), { recursive: true });
   writeFileSync(deploymentFile(network), `${JSON.stringify(deployment, null, 2)}\n`);

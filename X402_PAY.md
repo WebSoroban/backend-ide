@@ -1,6 +1,6 @@
 # WebSoroban Pay
 
-WebSoroban Pay turns an Express endpoint into an official x402 v2 resource that settles USDC on Stellar. It supports the `exact` scheme on **Stellar testnet** by default and on **Stellar mainnet** when an operator configures a mainnet facilitator. Every challenge, verification, settlement, and failure is recorded for Payment Studio, signed webhooks, and settlement reliability metrics.
+WebSoroban Pay turns an Express endpoint into an official x402 v2 resource that settles USDC on Stellar. It supports the `exact` scheme on **Stellar testnet** and **Stellar mainnet**. Both settle through OpenZeppelin Channels; the hosted production API (`websoroban.in`) has both enabled. Every challenge, verification, settlement, and failure is recorded for Payment Studio, signed webhooks, and settlement reliability metrics.
 
 ## Runtime requirements
 
@@ -18,8 +18,8 @@ PUBLIC_API_URL=https://api.example.com/api
 X402_FACILITATOR_URL=https://channels.openzeppelin.com/x402/testnet
 X402_FACILITATOR_API_KEY=your_relayer_api_key
 
-# Mainnet (optional). Enabled only when BOTH are set; there is no public fallback.
-X402_MAINNET_FACILITATOR_URL=
+# Mainnet. Enabled only when BOTH are set; there is no public fallback.
+X402_MAINNET_FACILITATOR_URL=https://channels.openzeppelin.com/x402
 X402_MAINNET_FACILITATOR_API_KEY=
 MAINNET_HORIZON_URL=https://horizon.stellar.org
 ```
@@ -44,6 +44,13 @@ npm run build:pay-sdk   # compiles packages/websoroban-pay to dist/
 | USDC issuer | `GBBD47IF…LFLA5` | `GA5ZSEJY…KZVN` (Circle) |
 
 Each network runs its own x402 resource server and talks to exactly one facilitator, so a testnet facilitator can never be asked to settle mainnet funds. The SDK infers the network from the key prefix and refuses a mismatched `network` option. The proxy rejects any payment whose requirements name a different network (`NETWORK_MISMATCH`).
+
+### Going live on mainnet
+
+1. Create a new endpoint in Payment Studio with **Mainnet** selected (a testnet endpoint cannot be switched).
+2. The payout address must exist on mainnet and trust Circle USDC; endpoint creation is blocked otherwise.
+3. Swap the server's endpoint id and key for the `wsp_live_` pair. `preflight()` re-checks both on mainnet.
+4. Make one small real payment through the hosted checkout and confirm the Stellar Expert receipt.
 
 ## Product flow
 

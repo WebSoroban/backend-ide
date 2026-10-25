@@ -28,7 +28,7 @@
     "dodo:products": "tsx scripts/create-dodo-products.ts",
     "worker:billing": "node dist/workers/billingWorker.js",
     "worker:billing:dev": "tsx watch workers/billingWorker.ts",
-    "test": "node --import tsx --test tests/*.test.ts packages/websoroban-pay/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts packages/websoroban-pay/*.test.ts packages/payloop/*.test.ts",
     "build:pay-sdk": "npm --prefix packages/websoroban-pay run build",
     "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/*.test.ts",
     "worker:payloop": "node dist/workers/payloopWorker.js",

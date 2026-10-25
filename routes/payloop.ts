@@ -5,7 +5,8 @@ import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin } from '../middleware/admin';
 import { rateLimit } from '../middleware/rateLimit';
-import { formatUsdc, MIN_INTERVAL_SECONDS, USDC_DECIMALS } from '../services/payloop/config';
+import { demoMerchant, formatUsdc, MIN_INTERVAL_SECONDS, payloopConfig, readDeployment, USDC_DECIMALS } from '../services/payloop/config';
+import type { NetworkId } from '../lib/networks';
 import { payloopContext, reconcilePayLoop } from '../services/payloop/indexer';
 
 const router = express.Router();
@@ -64,9 +65,30 @@ function percentile(sorted: number[], p: number) {
 }
 
 const publicLimit = rateLimit({ windowSec: 60, max: 120, prefix: 'payloop-read', keyFor: (req) => req.ip });
+const PAYLOOP_NETWORKS: NetworkId[] = ['testnet', 'mainnet'];
 
-router.get('/config', (_req, res) => {
-  const { config } = payloopContext();
+/**
+ * Every route takes ?network=testnet|mainnet (default testnet). Responds and
+ * returns null for an unknown network, or one with no deployed contract.
+ */
+function contextFor(req: Request, res: Response, requireDeployed = true) {
+  const raw = String(req.query.network || 'testnet');
+  if (!PAYLOOP_NETWORKS.includes(raw as NetworkId)) {
+    res.status(400).json({ success: false, error: 'network must be testnet or mainnet.' });
+    return null;
+  }
+  const ctx = payloopContext(raw as NetworkId);
+  if (requireDeployed && !ctx.config.enabled) {
+    res.status(404).json({ success: false, error: `PayLoop is not deployed on ${raw} yet.` });
+    return null;
+  }
+  return ctx;
+}
+
+router.get('/config', (req, res) => {
+  const ctx = contextFor(req, res, false);
+  if (!ctx) return;
+  const { config } = ctx;
   res.json({
     success: true,
     enabled: config.enabled,
@@ -76,12 +98,20 @@ router.get('/config', (_req, res) => {
     tokenDecimals: USDC_DECIMALS,
     minIntervalSeconds: MIN_INTERVAL_SECONDS,
     explorerBase: config.explorerBase,
-    demoMerchant: process.env.PAYLOOP_DEMO_MERCHANT?.trim() || null,
+    demoMerchant: demoMerchant(config.network),
+    // Mainnet: whether an independent review preceded the deployment.
+    audited: config.network === 'mainnet' ? readDeployment('mainnet')?.audited ?? null : null,
+    networks: PAYLOOP_NETWORKS.map((network) => {
+      const deployed = payloopConfig(network);
+      return { network, enabled: deployed.enabled, contractId: deployed.contractId || null };
+    }),
   });
 });
 
 router.get('/policies', publicLimit, asyncRoute(async (req: Request, res: Response) => {
-  const { config } = payloopContext();
+  const ctx = contextFor(req, res);
+  if (!ctx) return;
+  const { config } = ctx;
   const subscriber = String(req.query.subscriber || '').trim();
   const merchant = String(req.query.merchant || '').trim();
   const status = String(req.query.status || '').trim();
@@ -108,7 +138,9 @@ router.get('/policies', publicLimit, asyncRoute(async (req: Request, res: Respon
 }));
 
 router.get('/policies/:policyId', publicLimit, asyncRoute(async (req: Request, res: Response) => {
-  const { config } = payloopContext();
+  const ctx = contextFor(req, res);
+  if (!ctx) return;
+  const { config } = ctx;
   if (!/^\d{1,19}$/.test(req.params.policyId)) return res.status(400).json({ success: false, error: 'Invalid policy id.' });
   const policyId = BigInt(req.params.policyId);
   const policy = await prisma.payLoopPolicy.findUnique({
@@ -124,8 +156,10 @@ router.get('/policies/:policyId', publicLimit, asyncRoute(async (req: Request, r
 }));
 
 /** Relayer health: how many charges landed on schedule (KR: on-schedule recurring charges). */
-router.get('/stats', publicLimit, asyncRoute(async (_req: Request, res: Response) => {
-  const { config } = payloopContext();
+router.get('/stats', publicLimit, asyncRoute(async (req: Request, res: Response) => {
+  const ctx = contextFor(req, res);
+  if (!ctx) return;
+  const { config } = ctx;
   const where = { contractId: config.contractId };
   const [byStatus, byOutcome, recurring, sync] = await Promise.all([
     prisma.payLoopPolicy.groupBy({ by: ['status'], where, _count: { _all: true } }),
@@ -141,6 +175,7 @@ router.get('/stats', publicLimit, asyncRoute(async (_req: Request, res: Response
   const delays = recurring.map((charge) => charge.delaySeconds).sort((left, right) => left - right);
   res.json({
     success: true,
+    network: config.network,
     contractId: config.contractId,
     policies: Object.fromEntries(byStatus.map((row) => [row.status, row._count._all])),
     charges: Object.fromEntries(byOutcome.map((row) => [row.outcome, row._count._all])),
@@ -155,8 +190,10 @@ router.get('/stats', publicLimit, asyncRoute(async (_req: Request, res: Response
   });
 }));
 
-router.post('/reconcile', authenticate, requireAdmin, asyncRoute(async (_req: Request, res: Response) => {
-  const report = await reconcilePayLoop();
+router.post('/reconcile', authenticate, requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const ctx = contextFor(req, res);
+  if (!ctx) return;
+  const report = await reconcilePayLoop(ctx);
   res.status(report.mismatches.length ? 409 : 200).json({ success: report.mismatches.length === 0, ...report });
 }));
 

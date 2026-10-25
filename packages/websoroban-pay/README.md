@@ -33,6 +33,10 @@ app.listen(8787, async () => {
 
 The network comes from the key prefix. Passing a `network` that disagrees with the key throws, so a testnet key cannot guard a mainnet route.
 
+### Mainnet
+
+Create a separate **Mainnet** endpoint in Payment Studio and use its `wsp_live_` key and endpoint id. The code does not change. The payout address must exist on mainnet and trust Circle USDC (`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`). Buyers pay real USDC; the facilitator sponsors the network fee.
+
 `preflight()` confirms that the key reaches the WebSoroban facilitator and that the payout account holds a USDC trustline. Settlement to an account without one always fails.
 
 ## Wallet compatibility
@@ -51,7 +55,7 @@ x402 on Stellar needs a wallet that signs Soroban authorization entries: Freight
 ```ts
 import { checkUsdcTrustline } from '@web-soroban/pay';
 
-const report = await checkUsdcTrustline('G…', 'stellar:testnet');
+const report = await checkUsdcTrustline('G…', 'stellar:pubnet'); // or 'stellar:testnet'
 // report.status: 'ready' | 'missing_account' | 'missing_trustline' | 'not_authorized' | 'not_applicable' | 'unknown'
 ```
 
@@ -68,5 +72,7 @@ app.post('/webhooks/pay', express.raw({ type: 'application/json' }), (req, res) 
 ```
 
 Pass the **raw** body. A re-serialized JSON object will not match the signature. Signatures older than five minutes are rejected.
+
+For recurring USDC subscriptions, see [`@web-soroban/payloop`](https://www.npmjs.com/package/@web-soroban/payloop).
 
 The endpoint key belongs in a server-side environment variable. Never ship it to a browser.

@@ -1037,6 +1037,13 @@ pnpm pay
 
 The script signs one USDC authorization, the facilitator settles it, and you get the protected JSON plus a Stellar Expert receipt link. The payment appears in Payment Studio's activity feed. Browser users can pay the same endpoint from the hosted checkout.
 
+## 5. Go live on mainnet
+
+1. In **WebSoroban → Pay**, create a new endpoint with **Mainnet** selected. Its payout address must exist on mainnet and hold a trustline to Circle USDC (issuer \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN\`).
+2. Replace \`WEBSOROBAN_ENDPOINT_ID\`, \`WEBSOROBAN_PAY_KEY\` (now \`wsp_live_…\`), and \`STELLAR_PAY_TO\`. Nothing else changes: the network comes from the key.
+3. Restart. The preflight checks the key and the mainnet trustline.
+4. Pay once from a mainnet wallet through the hosted checkout and check the receipt. \`pnpm pay\` stays testnet-only so a terminal secret never spends real USDC.
+
 The scoped key stays on this server; never expose it in browser code or commit your \`.env\` file.
 `
     },
@@ -1109,13 +1116,15 @@ const PAYLOOP_MERCHANT: TemplateBundle = {
       path: '.env.example',
       content: `# WebSoroban API that indexes PayLoop policies and charges.
 PAYLOOP_API_URL=https://backend-ide-production-003a.up.railway.app/api
-# The Stellar address your subscribers pay. It needs a USDC trustline.
+# testnet (test USDC) or mainnet (real Circle USDC). Policy ids differ per network.
+PAYLOOP_NETWORK=testnet
+# The Stellar address your subscribers pay. It needs a USDC trustline on PAYLOOP_NETWORK.
 MERCHANT_ADDRESS=G_REPLACE_WITH_YOUR_MERCHANT_ADDRESS
 # The plan a subscriber must hold: amount per charge and billing interval.
 PLAN_AMOUNT_USDC=0.1
 PLAN_INTERVAL_SECONDS=60
 # Where customers subscribe (the WebSoroban PayLoop page or your own checkout).
-SUBSCRIBE_URL=https://websoroban.in/payloop
+SUBSCRIBE_URL=https://websoroban.in/payloop?network=testnet
 PORT=8788
 `
     },
@@ -1127,13 +1136,19 @@ PORT=8788
   return value;
 }
 
+function network(value: string): 'testnet' | 'mainnet' {
+  if (value !== 'testnet' && value !== 'mainnet') throw new Error('PAYLOOP_NETWORK must be testnet or mainnet.');
+  return value;
+}
+
 export const config = {
   port: Number(process.env.PORT || 8788),
   apiUrl: (process.env.PAYLOOP_API_URL || 'https://backend-ide-production-003a.up.railway.app/api').replace(/\\/$/, ''),
+  network: network(process.env.PAYLOOP_NETWORK?.trim() || 'testnet'),
   merchant: required('MERCHANT_ADDRESS'),
   planAmountUsdc: required('PLAN_AMOUNT_USDC'),
   planIntervalSeconds: Number(required('PLAN_INTERVAL_SECONDS')),
-  subscribeUrl: process.env.SUBSCRIBE_URL || 'https://websoroban.in/payloop',
+  subscribeUrl: process.env.SUBSCRIBE_URL || \`https://websoroban.in/payloop?network=\${process.env.PAYLOOP_NETWORK?.trim() || 'testnet'}\`,
 };
 `
     },
@@ -1163,7 +1178,8 @@ export function toStroops(usdc: string): bigint {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(\`\${config.apiUrl}\${path}\`, { signal: AbortSignal.timeout(10_000) });
+  const separator = path.includes('?') ? '&' : '?';
+  const response = await fetch(\`\${config.apiUrl}\${path}\${separator}network=\${config.network}\`, { signal: AbortSignal.timeout(10_000) });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error((body as { error?: string }).error || \`PayLoop API returned HTTP \${response.status}.\`);
   return body as T;
@@ -1235,7 +1251,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_request, response) => {
-  response.json({ ok: true, merchant: config.merchant });
+  response.json({ ok: true, network: config.network, merchant: config.merchant });
 });
 
 // 1. The customer asks for a message to sign with their wallet.
@@ -1330,7 +1346,8 @@ submits the charges and its indexer serves the policies.
 cp .env.example .env
 \`\`\`
 
-- \`MERCHANT_ADDRESS\`: the Stellar address you get paid at. It needs a USDC trustline.
+- \`PAYLOOP_NETWORK\`: \`testnet\` (test USDC, the default) or \`mainnet\` (real Circle USDC).
+- \`MERCHANT_ADDRESS\`: the Stellar address you get paid at. It needs a USDC trustline on that network.
 - \`PLAN_AMOUNT_USDC\` and \`PLAN_INTERVAL_SECONDS\`: the plan a customer must hold.
   \`0.1\` every \`60\` seconds is a good testnet demo; production plans are usually
   monthly (\`2592000\`).
@@ -1345,6 +1362,18 @@ pnpm dev
 Open the WebSoroban **PayLoop** page on testnet, connect a wallet, fund it with
 test USDC, and sign a policy to your \`MERCHANT_ADDRESS\` with the plan amount
 and interval. The first charge settles immediately.
+
+## Go live on mainnet
+
+1. Set \`PAYLOOP_NETWORK=mainnet\` and \`SUBSCRIBE_URL=https://websoroban.in/payloop?network=mainnet\`.
+2. Use a mainnet \`MERCHANT_ADDRESS\` with a trustline to Circle USDC
+   (issuer \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN\`).
+3. Set a real plan, for example \`9.99\` every \`2592000\` seconds.
+4. Subscribe once yourself from a second mainnet wallet and confirm \`/api/premium\`
+   returns \`200\`, then revoke.
+
+Testnet and mainnet policies are separate; a testnet subscription never unlocks
+mainnet access.
 
 ## 3. Unlock premium content
 
