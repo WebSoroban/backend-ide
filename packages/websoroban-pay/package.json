@@ -1,6 +1,6 @@
 {
   "name": "@web-soroban/pay",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "x402 payments for Express APIs, settled in USDC on Stellar through WebSoroban's managed facilitator",
   "license": "MIT",
   "repository": {
