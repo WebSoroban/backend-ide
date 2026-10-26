@@ -1124,7 +1124,7 @@ MERCHANT_ADDRESS=G_REPLACE_WITH_YOUR_MERCHANT_ADDRESS
 PLAN_AMOUNT_USDC=0.1
 PLAN_INTERVAL_SECONDS=60
 # Where customers subscribe (the WebSoroban PayLoop page or your own checkout).
-SUBSCRIBE_URL=https://websoroban.in/payloop?network=testnet
+SUBSCRIBE_URL=https://payloop.websoroban.in/?network=testnet
 PORT=8788
 `
     },
@@ -1148,7 +1148,7 @@ export const config = {
   merchant: required('MERCHANT_ADDRESS'),
   planAmountUsdc: required('PLAN_AMOUNT_USDC'),
   planIntervalSeconds: Number(required('PLAN_INTERVAL_SECONDS')),
-  subscribeUrl: process.env.SUBSCRIBE_URL || \`https://websoroban.in/payloop?network=\${process.env.PAYLOOP_NETWORK?.trim() || 'testnet'}\`,
+  subscribeUrl: process.env.SUBSCRIBE_URL || \`https://payloop.websoroban.in/?network=\${process.env.PAYLOOP_NETWORK?.trim() || 'testnet'}\`,
 };
 `
     },
@@ -1365,7 +1365,7 @@ and interval. The first charge settles immediately.
 
 ## Go live on mainnet
 
-1. Set \`PAYLOOP_NETWORK=mainnet\` and \`SUBSCRIBE_URL=https://websoroban.in/payloop?network=mainnet\`.
+1. Set \`PAYLOOP_NETWORK=mainnet\` and \`SUBSCRIBE_URL=https://payloop.websoroban.in/?network=mainnet\`.
 2. Use a mainnet \`MERCHANT_ADDRESS\` with a trustline to Circle USDC
    (issuer \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN\`).
 3. Set a real plan, for example \`9.99\` every \`2592000\` seconds.

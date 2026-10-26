@@ -65,6 +65,10 @@ const FRONTEND_BASE = (
   process.env.FRONTEND_URL?.trim() ||
   (process.env.NODE_ENV === 'production' ? 'https://websoroban.in' : 'http://localhost:3000')
 ).replace(/\/$/, '');
+// websoroban.in serves checkout from pay.websoroban.in; other frontends keep the path.
+const CHECKOUT_BASE = /^https:\/\/(www\.)?websoroban\.in$/.test(FRONTEND_BASE)
+  ? 'https://pay.websoroban.in/checkout'
+  : `${FRONTEND_BASE}/pay/checkout`;
 
 /** Path prefix of each network's hosted resource route, relative to /api/pay. */
 const RESOURCE_PREFIX: Record<X402Network, string> = {
@@ -296,7 +300,7 @@ function browserPaywall(network: X402Network) {
       const resourceUrl = String(paymentRequired?.resource?.url || '');
       const option = paymentRequired?.accepts?.[0] || {};
       const amount = escapeHtml(usdcAmount(option.amount, '—').replace(/^\$/, ''));
-      const checkoutUrl = escapeHtml(`${FRONTEND_BASE}/pay/checkout?resource=${encodeURIComponent(resourceUrl)}`);
+      const checkoutUrl = escapeHtml(`${CHECKOUT_BASE}?resource=${encodeURIComponent(resourceUrl)}`);
       const foot = mainnet ? 'Real USDC on Stellar Mainnet · network fee sponsored' : 'Testnet assets only · network fee sponsored';
       return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment required · WebSoroban Pay</title>
