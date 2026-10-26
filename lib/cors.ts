@@ -13,6 +13,8 @@ export const PRODUCTION_ORIGINS = [
   'https://web-soroban.vercel.app',
   'https://websoroban.in',
   'https://www.websoroban.in',
+  'https://pay.websoroban.in',
+  'https://payloop.websoroban.in',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ];

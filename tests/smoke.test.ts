@@ -183,6 +183,9 @@ test('cors: allows production, this project\'s Vercel previews, and nothing else
   const { isAllowedOrigin } = await import('../lib/cors');
   const preview = 'https://web-soroban-git-x402-harsh-sharmas-projects-edd77f1e.vercel.app';
   assert.equal(isAllowedOrigin('https://websoroban.in', true), true);
+  assert.equal(isAllowedOrigin('https://pay.websoroban.in', true), true);
+  assert.equal(isAllowedOrigin('https://payloop.websoroban.in', true), true);
+  assert.equal(isAllowedOrigin('https://evil.websoroban.in', true), false);
   assert.equal(isAllowedOrigin(undefined, true), true);
   assert.equal(isAllowedOrigin(preview, true), true);
   assert.equal(isAllowedOrigin('https://web-soroban-abc123def-harsh-sharmas-projects-edd77f1e.vercel.app', true), true);
